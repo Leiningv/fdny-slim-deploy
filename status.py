@@ -256,7 +256,25 @@ def make_app(stats: Stats) -> web.Application:
         return web.FileResponse(path, headers={"Content-Type": "audio/wav"})
 
     app = web.Application()
+    async def diag(req: web.Request) -> web.Response:
+        # temporary egress diagnostic: GET /diag?u=<url> -> upstream status + body head
+        import urllib.request, urllib.error
+        u = req.rel_url.query.get("u", "")
+        if not u.startswith("http"):
+            return web.Response(status=400, text="need ?u=http...")
+        rq = urllib.request.Request(u, headers={"User-Agent": "fdny-slim-diag"})
+        try:
+            with urllib.request.urlopen(rq, timeout=20) as r:
+                body = r.read(400).decode("utf-8", "replace")
+                return web.Response(text=f"OK {r.status}\n{body}")
+        except urllib.error.HTTPError as e:
+            body = e.read(400).decode("utf-8", "replace")
+            return web.Response(text=f"HTTP {e.code}\n{body}")
+        except Exception as e:
+            return web.Response(text=f"ERR {e}")
+
     app.router.add_get("/health", _health)
+    app.router.add_get("/diag", diag)
     app.router.add_get("/status", status_json)
     app.router.add_get("/audio/{name}", audio)
     app.router.add_get("/", home)
