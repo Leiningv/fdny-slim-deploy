@@ -156,11 +156,18 @@ def supervisor(profile: str, seg_dir: Path, stats) -> None:
         now = time.time()
         if not url or (now - url_at) > URL_TTL or quick_exits >= 2:
             try:
-                url = get_hls_url(FEEDS[profile])
-                url_at = now
-                quick_exits = 0
-                logging.info("[%s] got fresh stream URL", profile)
-                stats.event(profile, "stream-url refreshed")
+                url = pushed_url(profile)
+                if url:
+                    url_at = now
+                    quick_exits = 0
+                    logging.info("[%s] using relay-pushed stream URL", profile)
+                    stats.event(profile, "stream-url via relay")
+                else:
+                    url = get_hls_url(FEEDS[profile])
+                    url_at = now
+                    quick_exits = 0
+                    logging.info("[%s] got fresh stream URL", profile)
+                    stats.event(profile, "stream-url refreshed")
             except Exception as e:  # noqa: BLE001
                 logging.warning("[%s] stream login failed: %s", profile, e)
                 stats.event(profile, f"stream login failed: {e}")
