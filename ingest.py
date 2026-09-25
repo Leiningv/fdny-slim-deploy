@@ -73,17 +73,28 @@ def get_hls_url(feed_id: str) -> str:
         raise RuntimeError("BROADCASTIFY_USER / BROADCASTIFY_PASS not set")
     cj = http.cookiejar.CookieJar()
     op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-    op.addheaders = [("User-Agent", UA)]
+    op.addheaders = [
+        ("User-Agent", UA),
+        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Upgrade-Insecure-Requests", "1"),
+    ]
     post_data = f"username={_enc(user)}&password={_enc(pw)}&action=auth&redirect=%2F".encode()
     try:
         op.open(LOGIN_URL, timeout=30).read()
         req = urllib.request.Request(LOGIN_URL, data=post_data,
                                      headers={"Referer": LOGIN_URL,
+                                              "Origin": "https://www.broadcastify.com",
                                               "Content-Type": "application/x-www-form-urlencoded"})
         op.open(req, timeout=30).read()
         page = op.open(FEED_URL.format(feed_id), timeout=30).read().decode("utf-8", "replace")
     except Exception as e:
-        raise RuntimeError(f"broadcastify login request failed: {e}")
+        body = ""
+        try:
+            body = " | body: " + e.read()[:160].decode("utf-8", "replace")
+        except Exception:
+            pass
+        raise RuntimeError(f"broadcastify login request failed: {e}{body}")
     m = re.search(r'hlsUrl:\s*"((?:[^"\\]|\\.)*)"', page)
     if not m:
         raise RuntimeError("login failed or no hlsUrl on feed page")
