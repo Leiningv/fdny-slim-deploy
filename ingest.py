@@ -20,6 +20,7 @@ direct MP3 URLs need Premium, so we use the free web-player flow:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -39,6 +40,20 @@ LOGIN_URL = "https://www.broadcastify.com/login/"
 FEED_URL = "https://www.broadcastify.com/listen/feed/{}"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 URL_TTL = 25 * 60  # refresh the tokenized URL at least this often
+PUSH_FILE = Path(os.environ.get("SEG_DIR", "./segments")) / "hls_push.json"
+
+
+def pushed_url(profile: str) -> str | None:
+    """Stream URL pushed by the external login relay (www.broadcastify.com
+    blocks Render egress IPs; the HLS CDN does not). Fresh for 60 min."""
+    try:
+        d = json.loads(PUSH_FILE.read_text())
+        e = d.get(profile, {})
+        if e.get("url") and time.time() - e.get("ts", 0) < 3600:
+            return e["url"]
+    except Exception:
+        pass
+    return None
 
 
 def ffmpeg_bin() -> str:
