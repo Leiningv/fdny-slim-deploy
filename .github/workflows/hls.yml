@@ -1,0 +1,16 @@
+name: hls-refresh
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/hls_push.py
+        env:
+          BROADCASTIFY_USER: ${{ secrets.BROADCASTIFY_USER }}
+          BROADCASTIFY_PASS: ${{ secrets.BROADCASTIFY_PASS }}
+          HLS_PUSH_SECRET: ${{ secrets.HLS_PUSH_SECRET }}
+          PUSH_URL: https://fdny-slim.onrender.com/hls
