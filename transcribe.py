@@ -7,7 +7,6 @@ on a free-tier shared CPU this is what keeps two feeds sustainable 24/7.
 """
 from __future__ import annotations
 
-import audioop
 import logging
 import os
 import wave
@@ -32,7 +31,15 @@ def rms(wav_path: Path | str) -> int:
     try:
         with wave.open(str(wav_path), "rb") as w:
             frames = w.readframes(w.getnframes())
+        import audioop  # stdlib on py<=3.12
         return audioop.rms(frames, 2)
+    except ModuleNotFoundError:
+        import array, math
+        a = array.array("h")
+        a.frombytes(frames[: len(frames) - (len(frames) % 2)])
+        if not a:
+            return 0
+        return int(math.sqrt(sum(x * x for x in a) / len(a)))
     except Exception:  # noqa: BLE001
         return 0
 
