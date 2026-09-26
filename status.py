@@ -256,7 +256,51 @@ def make_app(stats: Stats) -> web.Application:
         return web.FileResponse(path, headers={"Content-Type": "audio/wav"})
 
     app = web.Application()
+    async def diag(req: web.Request) -> web.Response:
+        # temporary egress diagnostic: GET /diag?u=<url> -> upstream status + body head
+        import urllib.request, urllib.error
+        u = req.rel_url.query.get("u", "")
+        if not u.startswith("http"):
+            return web.Response(status=400, text="need ?u=http...")
+        rq = urllib.request.Request(u, headers={"User-Agent": "fdny-slim-diag"})
+        try:
+            with urllib.request.urlopen(rq, timeout=20) as r:
+                body = r.read(400).decode("utf-8", "replace")
+                return web.Response(text=f"OK {r.status}\n{body}")
+        except urllib.error.HTTPError as e:
+            body = e.read(400).decode("utf-8", "replace")
+            return web.Response(text=f"HTTP {e.code}\n{body}")
+        except Exception as e:
+            return web.Response(text=f"ERR {e}")
+
+    async def hls_push(req: web.Request) -> web.Response:
+        # login relay pushes tokenized HLS URLs here (see .github/workflows/hls.yml)
+        secret = os.environ.get("HLS_PUSH_SECRET", "")
+        try:
+            d = await req.json()
+        except Exception:
+            return web.Response(status=400, text="bad json")
+        if not secret or d.get("secret") != secret:
+            return web.Response(status=403, text="bad secret")
+        p = Path(os.environ.get("SEG_DIR", "./segments")) / "hls_push.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        cur = {}
+        try:
+            cur = json.loads(p.read_text())
+        except Exception:
+            pass
+        now = time.time()
+        saved = []
+        for prof, u in (d.get("urls") or {}).items():
+            if prof in ("hatzolah", "sullivan") and isinstance(u, str) and u.startswith("https://"):
+                cur[prof] = {"url": u, "ts": now}
+                stats.event(prof, "stream URL pushed via relay")
+                saved.append(prof)
+        p.write_text(json.dumps(cur))
+        return web.json_response({"ok": True, "feeds": saved})
+
     app.router.add_get("/health", _health)
+    app.router.add_get("/diag", diag)
     app.router.add_post("/hls", hls_push)
     app.router.add_get("/status", status_json)
     app.router.add_get("/audio/{name}", audio)
