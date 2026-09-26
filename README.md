@@ -67,3 +67,5 @@ or install `fdny-slim.service` (edit `YOUR_USER` first).
 - `main.py` — asyncio orchestrator, pair transcription, persistent dedup,
   alert log
 - `test_detect.py` — unit tests for the detection logic (`python3 test_detect.py`)
+
+<!-- redeploy trigger 2026-09-26 -->
