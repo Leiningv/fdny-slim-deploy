@@ -40,6 +40,8 @@ LOGIN_URL = "https://www.broadcastify.com/login/"
 FEED_URL = "https://www.broadcastify.com/listen/feed/{}"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 URL_TTL = 25 * 60  # refresh the tokenized URL at least this often
+STALL_SEC = int(os.environ.get("STALL_SEC", "90"))  # kill ffmpeg if no new segment this long
+STALL_RC = 75  # sentinel exit reason: ffmpeg killed for stalling
 PUSH_FILE = Path(os.environ.get("SEG_DIR", "./segments")) / "hls_push.json"
 
 
@@ -117,7 +119,14 @@ def get_hls_url(feed_id: str) -> str:
 
 
 def run_ffmpeg(profile: str, url: str, seg_dir: Path) -> int:
-    """Record continuously until ffmpeg exits. Returns its exit code."""
+    """Record continuously until ffmpeg exits or stalls. Returns its exit code.
+
+    Stall watchdog: with -reconnect ffmpeg can hang forever retrying a dead
+    playlist without exiting, and the supervisor would never refresh the URL.
+    If no segment file is created or updated for STALL_SEC, kill ffmpeg and
+    return STALL_RC so the supervisor re-reads the relay push file / logs in
+    for a fresh URL.
+    """
     pattern = str(seg_dir / f"{profile}-%03d.wav")
     cmd = [
         ffmpeg_bin(), "-hide_banner", "-loglevel", "error",
@@ -131,14 +140,34 @@ def run_ffmpeg(profile: str, url: str, seg_dir: Path) -> int:
         "-y", pattern,
     ]
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.PIPE, timeout=None)
-    except KeyboardInterrupt:
-        return 0
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE)
     except Exception as e:  # noqa: BLE001
         logging.warning("[%s] ffmpeg supervisor error: %s", profile, e)
         return -1
-    tail = (proc.stderr or b"")[-300:].decode(errors="replace").strip()
+    started = time.time()
+    try:
+        while proc.poll() is None:
+            time.sleep(5)
+            mtimes = [p.stat().st_mtime for p in seg_dir.glob(f"{profile}-*.wav")]
+            last = max(mtimes) if mtimes else started
+            if time.time() - last > STALL_SEC:
+                logging.warning("[%s] no new segment in %ss - killing stalled ffmpeg",
+                                profile, STALL_SEC)
+                proc.kill()
+                proc.wait()
+                return STALL_RC
+    except KeyboardInterrupt:
+        proc.kill()
+        return 0
+    except Exception as e:  # noqa: BLE001
+        logging.warning("[%s] ffmpeg watchdog error: %s", profile, e)
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        return -1
+    tail = (proc.stderr.read() or b"")[-300:].decode(errors="replace").strip()
     if tail:
         logging.warning("[%s] ffmpeg exited rc=%s: %s", profile, proc.returncode, tail)
     else:
@@ -176,8 +205,11 @@ def supervisor(profile: str, seg_dir: Path, stats) -> None:
                 continue
         stats.mark_ffmpeg_start(profile)
         started = time.time()
-        run_ffmpeg(profile, url, seg_dir)
+        rc = run_ffmpeg(profile, url, seg_dir)
         stats.mark_ffmpeg_exit(profile)
+        if rc == STALL_RC:
+            stats.event(profile, "ffmpeg stalled - re-tuning stream URL")
+            url = ""  # force re-read of relay push file / fresh login next loop
         lived = time.time() - started
         quick_exits = quick_exits + 1 if lived < 60 else 0
         backoff = 5 if lived >= 60 else min(backoff * 2, 120)
