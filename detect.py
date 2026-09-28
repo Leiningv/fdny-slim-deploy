@@ -407,6 +407,14 @@ def extract_audio_crosses(text: str) -> str | None:
         r = _pair(m.group(1), m.group(2))
         if r:
             return r
+    m = re.search(rf"\bbetween\s+({_BARE})\s+and\s+({_BARE})\b", t, re.I)
+    if m:
+        a, b = m.group(1).strip(), m.group(2).strip()
+        if all(re.fullmatch(r"[A-Za-z][A-Za-z.'-]{2,}", w)
+               for w in (a.split() + b.split())):
+            r = _pair(a, b)
+            if r:
+                return r
     # between with one bare side: "between North Cannon and Victory Boulevard"
     m = re.search(rf"\bbetween\s+({_BARE})\s+and\s+({_ANCH})\b", t, re.I)
     if m:
@@ -453,6 +461,14 @@ def extract_audio_crosses(text: str) -> str | None:
             r = _pair(m.group(1), m.group(2))
             if r:
                 return r
+    # 'off Woodbine Street' - single spoken cross (371 Irving 9/28; user: 'I
+    # wanna see cross streets of the address'). Renders 'off X'; the map side
+    # completes the pair downstream. LAST - every pair shape above wins.
+    m = re.search(rf"\boff(?:\s+of)?\s+({_ANCH})\b(?!\s+(?:and|&|to)\b)", t, re.I)
+    if m:
+        a = m.group(1).strip()
+        if _ok(a):
+            return a
     return None
 
 
@@ -579,20 +595,28 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         # house number on a named street ('710 Grand Street') is the dispatch
         # address; it beats the 'that's off X and Y' named-cross glue (710
         # Grand St posted as 'That'S Off Manhattan Ave & Graham Ave' 9/28)
+        # ordinal-numbered streets carry a digit word inside the name: '1718
+        # East 15th Street' missed here and the 'off of Kings Highway' anchor
+        # posted instead (box 3321 gas-main job 9/28). Allow one ordinal
+        # token after the alpha name, or an ordinal-only street ('515 81st
+        # Street' after the split-digit merge).
         hn = re.search(
-            r"\b(\d{1,5})\s+([a-z][a-z'\-]*(?:\s+[a-z][a-z'\-]*){0,2})\s+"
+            r"\b(\d{1,5})\s+(?:([a-z][a-z'\-]*(?:\s+[a-z][a-z'\-]*){0,2})\s+)?"
+            r"(?:(\d{1,3}(?:st|nd|rd|th))\s+)?"
             r"(street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
             r"lane|ln|parkway|pkwy)\b", _norm(text).lower())
         if hn:
-            w2 = hn.group(2).split()
+            w2 = (hn.group(2) or "").split()
             while w2 and w2[0] in _NAME_STOP:
                 w2.pop(0)
             nm = " ".join(w2)
-            if nm and nm not in _NAME_STOP:
+            ordw = hn.group(3) or ""
+            if (nm and nm not in _NAME_STOP) or ordw:
                 typ = {"st": "street", "ave": "avenue", "rd": "road", "dr": "drive",
                        "blvd": "boulevard", "pl": "place", "ln": "lane",
-                       "pkwy": "parkway"}.get(hn.group(3), hn.group(3))
-                return _with_area(f"{hn.group(1)} {_addr_title(nm + ' ' + typ)}",
+                       "pkwy": "parkway"}.get(hn.group(4), hn.group(4))
+                street = " ".join(x for x in (nm, ordw, typ) if x)
+                return _with_area(f"{hn.group(1)} {_addr_title(street)}",
                                   profile, text)
         num0 = _FIRE_NUM_DISPATCH_RE.search(text)
         if num0:
@@ -606,20 +630,22 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         # trailing all-digit word is allowed inside the name: Marcel 4 Road =
         # the map's Marcel Four Road)
         hn = re.search(
-            r"\b(\d{1,5})\s+([a-z][a-z'\-]*(?:\s+[a-z][a-z'\-]*){0,2}"
-            r"(?:\s+\d{1,2})?)\s+"
+            r"\b(\d{1,5})\s+(?:([a-z][a-z'\-]*(?:\s+[a-z][a-z'\-]*){0,2}"
+            r"(?:\s+\d{1,2})?)\s+)?(?:(\d{1,3}(?:st|nd|rd|th))\s+)?"
             r"(street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
             r"lane|ln|parkway|pkwy)\b", _norm(text).lower())
         if hn:
-            w2 = hn.group(2).split()
+            w2 = (hn.group(2) or "").split()
             while w2 and w2[0] in _NAME_STOP:
                 w2.pop(0)
             nm = " ".join(w2)
-            if nm and nm not in _NAME_STOP:
+            ordw = hn.group(3) or ""
+            if (nm and nm not in _NAME_STOP) or ordw:
                 typ = {"st": "street", "ave": "avenue", "rd": "road", "dr": "drive",
                        "blvd": "boulevard", "pl": "place", "ln": "lane",
-                       "pkwy": "parkway"}.get(hn.group(3), hn.group(3))
-                return _with_area(f"{hn.group(1)} {_addr_title(nm + ' ' + typ)}",
+                       "pkwy": "parkway"}.get(hn.group(4), hn.group(4))
+                street = " ".join(x for x in (nm, ordw, typ) if x)
+                return _with_area(f"{hn.group(1)} {_addr_title(street)}",
                                   profile, text)
     hwy = extract_highway_intersection(text, profile)
     if hwy:
@@ -756,6 +782,14 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\bgas leak\b")
     if v: return v
+    # 'gas main (struck|ruptured|...)' is a content nature - box 3321 (9/28)
+    # posted PHONE ALARM when 'a gas main that was ruptured by a contractor'
+    # was said; box 2720 ('gas main struck') suppressed no-nature same hour
+    m_gas = re.search(r"\bgas main\b", t)
+    if m_gas:
+        mp = re.search(r"\b(ruptured|struck|hit|broken|leaking|leak)\b",
+                       t[m_gas.end(): m_gas.end() + 40])
+        return _addr_title("gas main " + mp.group(1)) if mp else "Gas Main"
     # 'bus' on the Hatzolah channel = ambulance ('any units for a bus?')
     if ("hatzal" in profile.lower() or "hatzol" in profile.lower()) \
             and re.search(r"\bbus\b", t):
@@ -864,13 +898,74 @@ def is_priority(text: str) -> bool:
     return any(k in t for k in PRIORITY_KEYWORDS)
 
 
+
+# abbreviation-blind street identity for the self-leak cross filter
+_STREET_CANON = {"hwy": "highway", "st": "street", "ave": "avenue",
+                 "blvd": "boulevard", "rd": "road", "dr": "drive",
+                 "pl": "place", "ln": "lane", "pkwy": "parkway",
+                 "ct": "court", "ter": "terrace", "expwy": "expressway"}
+
+
+def _canon_street(s: str) -> str:
+    """'Kings Hwy' == 'Kings Highway': box 3321 (9/28) posted its own street
+    in the cross line because the leak check compared raw strings."""
+    w = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", s.strip().lower()).split()
+    return " ".join(_STREET_CANON.get(x, x) for x in w)
+
+
+def _merge_split_ordinals(t: str) -> str:
+    """Whisper splits a numbered street's ordinal into lone digits ('515 8 1
+    Street' = 515 81st Street - box 2720 gas-main job 9/28 suppressed with
+    the garbled '8 1 Street'). Merge two lone digits directly before a
+    street-type word. Space-separated pairs only (hyphenated '10-4' codes
+    untouched); merged value must be a plausible street number (< 200)."""
+    def _rep(m):
+        n = int(m.group(1) + m.group(2))
+        if n >= 200:
+            return m.group(0)
+        return _ordinal_street_num(n) + " "
+    return re.sub(
+        r"\b(\d)\s+(\d)\s+(?=(?:street|st|avenue|ave|boulevard|blvd|road|rd|"
+        r"drive|dr|place|pl|lane|ln|parkway|pkwy|court|ct|terrace|ter)\b)",
+        _rep, t, flags=re.I)
+
+
+
+_PHONETIC = {"adam": "A", "alpha": "A", "boy": "B", "baker": "B", "bravo": "B",
+             "charles": "C", "charlie": "C", "david": "D", "edward": "E",
+             "frank": "F", "george": "G", "henry": "H", "henry": "H", "ida": "I",
+             "john": "J", "king": "K", "lincoln": "L", "mary": "M", "mike": "M",
+             "nora": "N", "ocean": "O", "peter": "P", "queen": "Q",
+             "robert": "R", "romeo": "R", "sam": "S", "tom": "T", "union": "U",
+             "victor": "V", "william": "W", "x-ray": "X", "xray": "X",
+             "young": "Y", "zebra": "Z"}
+
+
+def extract_apartment(text: str) -> str:
+    """Spoken apartment detail -> 'Apartment 1R' (user 9/28: 'Smoke apartment
+    1L, 1R, whatever's being said'). FDNY reads the letter phonetically
+    ('apartment 1 Robert' = 1R). 'unit N' is apparatus, not an apartment -
+    only 'apartment/apt' count."""
+    t = _norm(text).lower()
+    m = re.search(r"\b(?:apartment|apt)s?\s+(\d{1,3})\s+([a-z][a-z\-]+)\b", t)
+    if m and m.group(2) in _PHONETIC:
+        return "Apartment " + m.group(1) + _PHONETIC[m.group(2)]
+    m = re.search(r"\b(?:apartment|apt)s?\s+(\d{1,3})\s*([a-z])?\b", t)
+    if m:
+        return "Apartment " + m.group(1) + (m.group(2) or "").upper()
+    m = re.search(r"\b(?:apartment|apt)s?\s+([a-z][a-z\-]+)\b", t)
+    if m and m.group(1) in _PHONETIC:
+        return "Apartment " + _PHONETIC[m.group(1)]
+    return ""
+
+
 def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     """Return an alert dict, or None when this chunk should not alert."""
     source = profile
     profile = profile.removeprefix("zello-")  # zello-* reuses base grammar
     if profile == "hatzalah":  # source label spelling -> grammar spelling
         profile = "hatzolah"
-    t = _split_box_glue(_norm(text))
+    t = _merge_split_ordinals(_split_box_glue(_norm(text)))
     if len(t) < 10:
         return None
     any_units = _ANY_UNITS_RE.search(t)
@@ -933,14 +1028,17 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         # the incident address is never its own cross street ('218 Union
         # Street & Henry Street' posted 6:26 AM 9/28 - dispatch gave the
         # address, then one real cross)
-        addr_core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", addr.split(",")[0]).strip().lower()
+        addr_core = _canon_street(addr.split(",")[0])
         parts = [p.strip() for p in cross.split("&")]
-        parts = [p for p in parts
-                 if re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", p).strip().lower() != addr_core]
-        cross = " & ".join(parts) if len(parts) == 2 else None
+        parts = [p for p in parts if _canon_street(p) != addr_core]
+        cross = " & ".join(parts) if parts else None
+    nature = get_nature(t, profile)
+    apt = extract_apartment(t)
+    if apt and nature:
+        nature = f"{nature}, {apt}"
     return {
         "source": source,
-        "nature": get_nature(t, profile),
+        "nature": nature,
         "address": addr,
         "excerpt": t[:280],
         # box spoken anywhere in the chunk (the excerpt above truncates at

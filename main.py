@@ -1013,6 +1013,18 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if not verified:
             stats.event(profile, f"unconfirmed address: {hit['address']}")
     cross = (hit.get("cross") or "").strip()
+    if cross and "&" not in cross and lat is not None and lon is not None \
+            and verified_label:
+        # single spoken cross ('off Woodbine Street') - complete the pair
+        # from the map, spoken side first
+        comp, _exact = await _cross_streets(lat, lon, hit["address"])
+        if comp:
+            spoken = cross.strip().lower()
+            other = [p.strip() for p in comp.split("&")
+                     if p.strip() and p.strip().lower() != spoken]
+            if other:
+                cross = f"{cross} & {other[0]}"
+                stats.event(profile, f"cross completed from map: {cross}")
     if not cross and lat is not None and lon is not None and verified_label:
         street_core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"])
         street_core = re.sub(r"[,.;].*$", "", street_core).strip().lower()
@@ -1210,7 +1222,7 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         addr_line += " (not confirmed)"
     lines = [f"*\N{FIRE} {nature}*", "", addr_line]
     if crosses:
-        lines.append(f"between {crosses}")
+        lines.append(f"between {crosses}" if "&" in crosses else f"off {crosses}")
     if box:
         line = f"Box {box}"
         if box_closest:
