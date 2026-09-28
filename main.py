@@ -347,6 +347,74 @@ async def _cross_streets(lat: float, lon: float, address: str) -> tuple:
     return None, False
 
 
+async def _map_street_names(lat: float, lon: float, street: str = "") -> set:
+    """Canonical street-name pool for fixing whisper-mangled names ('Nickabocker'
+    -> 'Knickerbocker'). Primary: every street crossing the incident street - a
+    wrong house number can put the geocoded point far from the spoken crosses,
+    so a point-radius pool alone misses them. Fallback: names around the point.
+    Overpass is free/keyless; failures just skip canonicalization."""
+    hdrs = {"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"}
+    eps = ("https://overpass-api.de/api/interpreter",
+           "https://overpass.kumi.systems/api/interpreter",
+           "https://overpass.private.coffee/api/interpreter")
+
+    async def _ov(q: str):
+        for endpoint in eps:
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(endpoint, data={"data": q}, headers=hdrs,
+                                      timeout=aiohttp.ClientTimeout(total=12)) as r:
+                        if r.status != 200:
+                            continue
+                        return await r.json()
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    async def _build() -> set:
+        pool: set = set()
+        if street:
+            pat = re.escape(street.strip())
+            d1 = await _ov(f"[out:json][timeout:10];way(around:3000,{lat},{lon})"
+                           f"[highway][name~\"^{pat}$\",i];node(w);out ids;")
+            ids = [str(e["id"]) for e in (d1 or {}).get("elements") or [] if e.get("id")]
+            if ids:
+                d2 = await _ov(f"[out:json][timeout:10];node(id:{','.join(ids)})->.n;"
+                               f"way(bn.n)[highway][name];out tags;")
+                pool |= {(el.get("tags") or {}).get("name", "").strip()
+                         for el in (d2 or {}).get("elements") or []
+                         if (el.get("tags") or {}).get("name")}
+        if not pool:
+            d3 = await _ov(f"[out:json][timeout:10];way(around:800,{lat},{lon})[highway][name];out tags;")
+            pool |= {(el.get("tags") or {}).get("name", "").strip()
+                     for el in (d3 or {}).get("elements") or []
+                     if (el.get("tags") or {}).get("name")}
+        return pool
+
+    try:
+        return await asyncio.wait_for(_build(), timeout=30)
+    except Exception:  # noqa: BLE001 - never delay an alert over spelling polish
+        return set()
+
+
+def _canon_name(name: str, pool: set) -> str:
+    """Fuzzy-normalize a (possibly whisper-mangled) street name to the
+    map-canonical spelling from the local pool. Conservative: only replaces
+    on a close confident match, otherwise keeps the original."""
+    import difflib
+    nl = name.lower().strip()
+    if not nl or not pool:
+        return name
+    best, best_r = None, 0.0
+    for cand in pool:
+        r = difflib.SequenceMatcher(None, nl, cand.lower()).ratio()
+        if r > best_r:
+            best, best_r = cand, r
+    if best and best_r >= 0.75 and best.lower() != nl:
+        return best
+    return name
+
+
 RECENT_FILE = Path(os.environ.get("RECENT_FILE", "./segments/recent_posts.json"))
 _INCIDENT_DEDUP_SEC = 600
 _ADDR_GENERIC = {"street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd",
@@ -381,7 +449,6 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     """User's posting rules (9/28): verified addresses only; Sullivan feed posts
     only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
     Returns 'sent' | 'queued' | 'suppressed'."""
-    text_out = format_alert(hit)
     now = time.time()
     nat_norm = (hit.get("nature") or "").strip().lower()
     toks = _rare_tokens(hit["address"])
@@ -408,6 +475,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         stats.event(profile, f"suppressed (Fall excluded): {hit['address']}")
         ops_log(f"suppressed (Fall excluded): {hit['address']}")
         return "suppressed"
+    verified = True
     verified_label = ""
     lat = lon = None
     locality = ""
@@ -419,7 +487,6 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             if fixed != hit["address"]:
                 logging.info("[%s] area corrected by geocode: %s -> %s", profile, hit["address"], fixed)
                 stats.event(profile, f"area corrected: {hit['address']} -> {fixed}")
-                text_out = text_out.replace(hit["address"], fixed, 1)
                 hit["address"] = fixed
         if profile == "sullivan" and verified and not in_sullivan:
             logging.info("[%s] suppressed (verified outside Sullivan Co): %s", profile, hit["address"])
@@ -427,7 +494,6 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             ops_log(f"suppressed (outside Sullivan Co): {hit['nature']} @ {hit['address']}")
             return "suppressed"
         if not verified:
-            text_out = text_out.replace(hit["address"], hit["address"] + " (not confirmed)", 1)
             stats.event(profile, f"unconfirmed address: {hit['address']}")
     cross = (hit.get("cross") or "").strip()
     if not cross and lat is not None and lon is not None and verified_label:
@@ -439,23 +505,37 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             if cross:
                 tag = "computed" if exact else "approx"
                 stats.event(profile, f"cross streets ({tag}): {cross}")
-    if cross:
-        text_out = text_out.replace(hit["address"], f"{hit['address']} — between {cross}", 1)
-    else:
+    if cross and lat is not None and lon is not None and verified_label:
+        core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"].split(",")[0]).strip()
+        pool = await _map_street_names(lat, lon, core)
+        if pool:
+            parts = [p.strip() for p in cross.split("&", 1)]
+            canon = [_canon_name(p, pool) for p in parts]
+            new_cross = " & ".join(canon)
+            if new_cross != cross:
+                logging.info("[%s] crosses canonicalized: %s -> %s", profile, cross, new_cross)
+                stats.event(profile, f"crosses canonicalized: {cross} -> {new_cross}")
+                cross = new_cross
+            canon_core = _canon_name(core, pool)
+            if canon_core != core:
+                fixed_addr = hit["address"].replace(core, canon_core, 1)
+                logging.info("[%s] address canonicalized: %s -> %s", profile, hit["address"], fixed_addr)
+                stats.event(profile, f"address canonicalized: {hit['address']} -> {fixed_addr}")
+                hit["address"] = fixed_addr
+    if not cross:
         ops_log(f"cross streets unresolved: {hit['nature']} @ {hit['address']}")
+    colony = None
     if profile.lower().startswith(("sullivan", "hatzalah", "zello-sullivan", "zello-hatzalah")):
         try:
             import sullivan_colonies as scol
-            colony = None
             if verified_label:
                 r0 = scol.match_colony_for_verified_address(verified_label)
                 colony = r0.colony_name if r0.found else None
             if not colony:
                 colony = scol.match_sullivan_colony(hit.get("excerpt") or "")
-            if colony:
-                text_out = f"{text_out}\n\n{colony}"
         except Exception as e:  # noqa: BLE001
             logging.warning("colony match failed: %s", e)
+    text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony)
     ok = await alert_waha.send_text(text_out)
     if not ok:
         ops_log(f"ALERT POST FAILED: {hit['nature']} @ {hit['address']}")
@@ -476,16 +556,24 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     return "sent"
 
 
-def format_alert(hit: dict) -> str:
-    now = datetime.now(NY).strftime("%-m/%-d %-I:%M %p")
-    label = SOURCE_LABEL.get(hit["source"], hit["source"])
-    priority = "\N{POLICE CARS REVOLVING LIGHT} PRIORITY — " if hit.get("priority") else ""
-    return (
-        f"{priority}\N{FIRE} {hit['nature']} — {label}\n"
-        f"\N{ROUND PUSHPIN} {hit['address']}\n"
-        f"\N{CLOCK FACE ONE OCLOCK} {now} ET\n"
-        f'"{hit["excerpt"]}"'
-    )
+def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
+                 footer: str | None = None) -> str:
+    """User-picked layout (9/28, option 1): bold caps nature header with fire
+    emoji; bold pinned address; plain 'between X & Y' crosses line; time;
+    italic source footer at the very bottom. No transcript quote, ever.
+    Audio follows separately as a voice-note bubble."""
+    now = datetime.now(NY).strftime("%-I:%M %p")
+    nature = (hit.get("nature") or "").strip().upper()
+    addr_line = f"\N{ROUND PUSHPIN} *{hit['address']}*"
+    if not confirmed:
+        addr_line += " (not confirmed)"
+    lines = [f"*\N{FIRE} {nature}*", "", addr_line]
+    if crosses:
+        lines.append(f"between {crosses}")
+    lines += ["", f"\N{CLOCK FACE ONE OCLOCK} {now}"]
+    label = footer or SOURCE_LABEL.get(hit["source"], hit["source"])
+    lines.append(f"_{label}_")
+    return "\n".join(lines)
 
 
 def _concat_pcm(a: Path, b: Path, out: Path) -> bool:

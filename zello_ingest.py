@@ -14,7 +14,8 @@ no dead air. A segment is finalized when full (20s) or when audio has been
 quiet for FLUSH_SEC, whichever comes first.
 
 Env:
-  ZELLO_USER / ZELLO_PASS        listener account credentials
+  ZELLO_USER / ZELLO_PASS        listener account credentials (channel 1)
+  ZELLO_USER_2 / ZELLO_PASS_2    dedicated account for zello-sullivan (optional)
   ZELLO_ISSUER / ZELLO_PRIVATE_KEY  dev-console key pair (PEM; \n escapes ok)
   ZELLO_CH_HATZOLAH / ZELLO_CH_SULLIVAN  channel name overrides (optional)
 """
@@ -185,8 +186,12 @@ def run_session(profile: str, channel: str, seg_dir: Path, stats) -> None:
     from ingest import ffmpeg_bin
 
     token = mint_token()
-    user = os.environ["ZELLO_USER"].strip()
-    pw = os.environ["ZELLO_PASS"]
+    # zello-sullivan gets its own dedicated account when ZELLO_USER_2 is set:
+    # Zello allows ONE active session per account, two channels need two accounts.
+    sfx = "_2" if profile == "zello-sullivan" and os.environ.get("ZELLO_USER_2") else ""
+    user = os.environ[f"ZELLO_USER{sfx}"].strip()
+    pw = os.environ[f"ZELLO_PASS{sfx}"]
+    logging.info("[%s] zello login as account%s", profile, sfx or "1")
     proc = subprocess.Popen(
         [ffmpeg_bin(), "-hide_banner", "-loglevel", "error",
          "-f", "ogg", "-i", "pipe:0",
@@ -277,7 +282,8 @@ def run_session(profile: str, channel: str, seg_dir: Path, stats) -> None:
 # kick each other. Until a second account exists, PASSIVE channels back off
 # hard so the primary channel holds the account 24/7. Remove a profile from
 # ZELLO_PASSIVE once it has its own credentials.
-PASSIVE = {p.strip() for p in os.environ.get("ZELLO_PASSIVE", "zello-sullivan").split(",") if p.strip()}
+_DEFAULT_PASSIVE = "" if os.environ.get("ZELLO_USER_2") else "zello-sullivan"
+PASSIVE = {p.strip() for p in os.environ.get("ZELLO_PASSIVE", _DEFAULT_PASSIVE).split(",") if p.strip()}
 PASSIVE_BACKOFF = int(os.environ.get("ZELLO_PASSIVE_BACKOFF", "300"))
 
 
