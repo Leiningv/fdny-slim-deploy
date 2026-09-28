@@ -451,7 +451,7 @@ def get_nature(text: str) -> str:
         return "Difficulty Breathing"
     if re.search(r"\b(?:cardiac arrest|heart attack|full arrest|cpr in progress)\b", t):
         return "Cardiac Arrest"
-    if re.search(r"\b(?:unresponsive|not responsive|unconscious)\b", t):
+    if re.search(r"\b(?:unresponsive|not responsive)\b", t):
         return "Unresponsive"
     if re.search(r"\bchok(?:ing|e)\b", t):
         return "Choking"
@@ -467,8 +467,52 @@ def get_nature(text: str) -> str:
         return "Bleeding"
     if re.search(r"\bchest pain\b", t):
         return "Chest Pain"
+    if re.search(r"\bdrown", t):
+        return "Drowning"
+    if re.search(r"\bsyncope\b|\bfainted\b|\bpassed out\b", t):
+        return "Syncope"
+    if re.search(r"\bdiabet|\blow (?:blood )?sugar\b|\bhigh (?:blood )?sugar\b", t):
+        return "Diabetic Emergency"
+    if re.search(r"\ballergic\b|\banaphyla|\bbee sting\b", t):
+        return "Allergic Reaction"
+    if re.search(r"\babdominal pain\b|\bstomach pain\b", t):
+        return "Abdominal Pain"
+    if re.search(r"\baltered mental\b|\b(?:pationt|patient)?\s*ams\b|\bdisoriented\b", t):
+        return "Altered Mental Status"
+    if re.search(r"\bstructure fire\b|\bbuilding fire\b|\bhouse fire\b", t):
+        return "Structure Fire"
+    if re.search(r"\bkitchen fire\b", t):
+        return "Kitchen Fire"
+    if re.search(r"\bcar fire\b|\bvehicle fire\b|\bauto fire\b", t):
+        return "Car Fire"
+    if re.search(r"\btrauma\b", t):
+        return "Full Trauma"
+    if re.search(r"\bunconscious\b", t):
+        return "Unconscious"
+    if re.search(r"(?<![\d-])\bcode\b(?!\s*\d)", t):
+        return "Code"
+    if re.search(r"\bstill alarm\b", t):
+        return "Still Alarm"
+    if re.search(r"\bwater condition\b|\bwater leak\b|\bburst pipe\b", t):
+        return "Water Condition"
+    if re.search(r"\bsprinkler", t):
+        return "Sprinkler Activation"
+    if re.search(r"\bmanhole\b", t):
+        return "Manhole"
+    if re.search(r"\belectrical\b|\bwires down\b|\btransformer\b", t):
+        return "Electrical"
+    if re.search(r"\belevator\b", t):
+        return "Elevator Emergency"
+    if re.search(r"\bco alarm\b|\bcarbon monoxide\b", t):
+        return "CO Alarm"
+    if re.search(r"\brubbish\b|\bgarbage fire\b|\btrash fire\b", t):
+        return "Rubbish Fire"
+    if re.search(r"\boutside fire\b|\bbrush fire\b", t):
+        return "Outside Fire"
+    if re.search(r"\baided\b", t):
+        return "Aided Case"
     if re.search(r"\b(?:fire|smoke|automatic|smoke detector|co)\s+alarm\b|\balarm activation\b|\bclass\s*3\b", t):
-        return "Fire Alarm Activation"
+        return "Automatic Alarm"
     if "phone alarm" in t or "still alarm" in t:
         return "Phone Alarm (Fire)"
     if re.search(r"\b(?:fire|smoke|burning)\b", t) and not _negative_fire_context(t):

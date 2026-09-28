@@ -182,19 +182,56 @@ async def _nominatim(q: str):
         return None
 
 
-async def geocode_verify(addr: str, profile: str = "") -> tuple[bool, bool]:
-    """Verify an address against OpenStreetMap Nominatim (free, no key).
-    Returns (verified, in_sullivan_county). Fails open as (False, False)."""
+async def _planning_labs(addr: str, allowed_boroughs: list[str]) -> str | None:
+    """NYC Planning Labs geosearch (free, keyless). Returns the verified label
+    when the top hit is in an allowed borough, else None. Network error -> ''."""
+    try:
+        q = addr.replace(" ", "%20")
+        url = f"https://geosearch.planninglabs.nyc/v2/search?text={q}&size=1"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                if r.status != 200:
+                    return ""
+                data = await r.json()
+        feats = data.get("features") or []
+        if not feats:
+            return None
+        props = feats[0].get("properties") or {}
+        borough = (props.get("borough") or "").lower()
+        if borough not in [b.lower() for b in allowed_boroughs]:
+            return None
+        return str(props.get("label") or "") or None
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def geocode_verify(addr: str, profile: str = "") -> tuple[bool, bool, str]:
+    """Returns (verified, in_sullivan_county, verified_label).
+    NYC profiles: Planning Labs with the old system's borough filters (FDNY
+    Brooklyn-only; Hatzalah Brooklyn/Queens/Manhattan/Bronx), Nominatim fallback.
+    Sullivan: Nominatim + county check."""
+    p = profile.lower()
+    if "fdny" in p or "hatzalah" in p or "hatzolah" in p:
+        boroughs = ["Brooklyn"] if "fdny" in p else ["Brooklyn", "Queens", "Manhattan", "Bronx"]
+        for q in _geocode_variants(addr, profile):
+            label = await _planning_labs(q, boroughs)
+            if label == "":
+                break  # network failure -> Nominatim fallback
+            if label:
+                return True, False, label
+        if "fdny" in p:
+            return False, False, ""
+        # hatzalah: fall through to Nominatim for non-NYC (5 Towns, Rockland...)
     for q in _geocode_variants(addr, profile):
         res = await _nominatim(q)
         if res is None:
-            return False, False  # network/API failure: don't burn retries
+            return False, False, ""  # network/API failure: don't burn retries
         if res:
             disp = str(res[0].get("display_name", ""))
             county = str((res[0].get("address") or {}).get("county", ""))
-            return True, ("Sullivan" in county or "Sullivan County" in disp)
+            return True, ("Sullivan" in county or "Sullivan County" in disp), disp
         await asyncio.sleep(1.1)  # nominatim 1 req/s
-    return False, False
+    return False, False, ""
 
 
 async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None) -> str:
@@ -212,8 +249,14 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         stats.event(profile, f"suppressed (no nature): {hit['address']}")
         ops_log(f"suppressed (no nature): {hit['address']}")
         return "suppressed"
+    if profile.lower().startswith(("hatzalah", "zello-hatzalah")) and hit.get("nature") == "Fall":
+        logging.info("[%s] suppressed (Hatzalah Fall excluded): %s", profile, hit["address"])
+        stats.event(profile, f"suppressed (Fall excluded): {hit['address']}")
+        ops_log(f"suppressed (Fall excluded): {hit['address']}")
+        return "suppressed"
+    verified_label = ""
     if GEOCODE_VERIFY:
-        verified, in_sullivan = await geocode_verify(hit["address"], profile)
+        verified, in_sullivan, verified_label = await geocode_verify(hit["address"], profile)
         if profile == "sullivan" and verified and not in_sullivan:
             logging.info("[%s] suppressed (verified outside Sullivan Co): %s", profile, hit["address"])
             stats.event(profile, f"suppressed (outside Sullivan Co): {hit['nature']} @ {hit['address']}")
@@ -222,6 +265,19 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if not verified:
             text_out = text_out.replace(hit["address"], hit["address"] + " (not confirmed)", 1)
             stats.event(profile, f"unconfirmed address: {hit['address']}")
+    if profile.lower().startswith(("sullivan", "hatzalah", "zello-sullivan", "zello-hatzalah")):
+        try:
+            import sullivan_colonies as scol
+            colony = None
+            if verified_label:
+                r0 = scol.match_colony_for_verified_address(verified_label)
+                colony = r0.colony_name if r0.found else None
+            if not colony:
+                colony = scol.match_sullivan_colony(hit.get("excerpt") or "")
+            if colony:
+                text_out = f"{text_out}\n\n{colony}"
+        except Exception as e:  # noqa: BLE001
+            logging.warning("colony match failed: %s", e)
     ok = await alert_waha.send_text(text_out)
     if not ok:
         ops_log(f"ALERT POST FAILED: {hit['nature']} @ {hit['address']}")
