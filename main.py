@@ -328,6 +328,55 @@ _OVERPASS_EPS = ("https://overpass-api.de/api/interpreter",
                  "https://overpass.private.coffee/api/interpreter")
 
 
+async def _intersection_point(address: str, cross: str) -> tuple:
+    """Bare-street verification: the heard street truly crosses a spoken cross
+    street (shared OSM way node) -> (lat, lon) of a shared node, else
+    (None, None). '15th & 16th Avenue' shares its suffix with the bare side."""
+    street = re.sub(r"[,.;].*$", "", address).strip()
+    parts = [p.strip() for p in (cross or "").split("&", 1) if p.strip()]
+    if not street or not parts:
+        return None, None
+    _T = r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln|Parkway|Pkwy|Court|Ct|Terrace|Ter)"
+    typ = re.search(rf"\b{_T}\b", parts[-1], re.I)
+    fixed = []
+    for p in parts:
+        if typ and not re.search(rf"\b{_T}\b", p, re.I):
+            p = f"{p} {typ.group(0)}"
+        fixed.append(p)
+    names = [street] + fixed
+    pat = "^(" + "|".join(re.escape(n) for n in names) + ")$"
+    hdrs = {"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"}
+    q = f'[out:json][timeout:15];way["name"~"{pat}",i](40.55,-74.06,40.75,-73.85);out geom;'
+    data = None
+    for ep in _OVERPASS_EPS:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(ep, data={"data": q}, headers=hdrs,
+                                  timeout=aiohttp.ClientTimeout(total=18)) as r:
+                    if r.status != 200:
+                        continue
+                    data = await r.json()
+                    break
+        except Exception:  # noqa: BLE001
+            continue
+    if data is None:
+        return None, None
+    nodes: dict = {}
+    for el in data.get("elements") or []:
+        nm = (el.get("tags") or {}).get("name", "").strip().lower()
+        for g in el.get("geometry") or []:
+            nodes.setdefault(nm, {})[(round(g.get("lat", 0), 6),
+                                      round(g.get("lon", 0), 6))] = (g.get("lat"), g.get("lon"))
+    own = nodes.get(street.lower()) or {}
+    if not own:
+        return None, None
+    for p in fixed:
+        shared = set(own) & set(nodes.get(p.lower()) or {})
+        if shared:
+            return own[sorted(shared)[0]]
+    return None, None
+
+
 async def _correct_street_via_crosses(heard_addr: str, cross: str) -> str:
     """User rule 9/28: when the heard street can't be confirmed but the cross
     streets are known, the real street is the one that truly crosses BOTH -
@@ -568,6 +617,66 @@ def _save_box_cache(c: dict) -> None:
         pass
 
 
+_SOCRATA_BOX = "https://data.cityofnewyork.us/resource/v57i-gtxb.json"
+_BORO_PREFIX = {"B": "Brooklyn", "M": "Manhattan", "Q": "Queens",
+                "X": "Bronx", "R": "Staten Island"}
+
+
+async def _box_lookup_socrata(box4: str) -> list:
+    """FDNY box -> [(location, borough), ...] from the NYC Open Data
+    'In-Service Alarm Box Locations' dataset (v57i-gtxb). Numbering verified
+    identical to fdnewyork dispatch boxes (B2393='AVENUE M & E 84 ST')."""
+    codes = ",".join(f"'{p}{box4}'" for p in _BORO_PREFIX)
+    url = (f"{_SOCRATA_BOX}?$select=borobox,location&$where=borobox in({codes})"
+           f"&$limit=10")
+    rows: list = []
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers={"User-Agent": "fdny-slim/1.0"},
+                             timeout=aiohttp.ClientTimeout(total=12)) as r:
+                if r.status != 200:
+                    return []
+                data = await r.json()
+        for rec in data:
+            code = rec.get("borobox") or ""
+            loc = (rec.get("location") or "").strip()
+            boro = _BORO_PREFIX.get(code[:1], "")
+            if loc and boro:
+                rows.append((loc, boro))
+    except Exception as e:  # noqa: BLE001
+        logging.warning("socrata box lookup failed for %s: %s", box4, e)
+        return []
+    return rows
+
+
+async def _nearest_box(lat: float, lon: float, borough: str = "") -> tuple:
+    """Address -> closest FDNY box (user rule 9/28: no heard box -> look up
+    the closest box to the address). Radius-ordered Socrata query; returns
+    (box_digits, location, distance_m) or (None, None, None)."""
+    import urllib.parse
+    boro_filter = ""
+    if borough and borough.lower() in ("brooklyn", "queens", "manhattan", "bronx", "staten island"):
+        boro_filter = f" AND borough='{borough.title()}'"
+    where = (f"within_circle(location_point,{lat},{lon},500){boro_filter}")
+    order = f"distance_in_meters(location_point,'POINT({lon} {lat})')"
+    url = (f"{_SOCRATA_BOX}?$select=borobox,location"
+           f"&$where={urllib.parse.quote(where)}"
+           f"&$order={urllib.parse.quote(order)}&$limit=1")
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers={"User-Agent": "fdny-slim/1.0"},
+                             timeout=aiohttp.ClientTimeout(total=12)) as r:
+                if r.status != 200:
+                    return None, None, None
+                data = await r.json()
+        if data:
+            code = data[0].get("borobox") or ""
+            return code[1:], (data[0].get("location") or "").strip(), None
+    except Exception as e:  # noqa: BLE001
+        logging.warning("nearest box lookup failed: %s", e)
+    return None, None, None
+
+
 async def _box_lookup(box4: str) -> list:
     """FDNY box -> location rows from fdnewyork.com/getbox.asp (the user's named
     source). Boxes are per-borough; returns [(location, borough), ...].
@@ -578,7 +687,11 @@ async def _box_lookup(box4: str) -> list:
     cache = _load_box_cache()
     if box4 in cache:
         return [tuple(r) for r in cache[box4]]
-    rows: list = []
+    rows: list = await _box_lookup_socrata(box4)
+    if rows:
+        cache[box4] = rows
+        _save_box_cache(cache)
+        return rows
     try:
         data = urllib.parse.urlencode({"action": "Save Form Data", "id": box4}).encode()
         req = urllib.request.Request(
@@ -601,6 +714,61 @@ async def _box_lookup(box4: str) -> list:
     cache[box4] = rows
     _save_box_cache(cache)
     return rows
+
+
+def _box_address_correction(heard_addr: str, rows: list) -> str:
+    """Box-supported address correction for the whisper ordinal digit-drop:
+    heard '1238 East 4th Street' (or bare 'East 4th Street'), box row side
+    'E 84 ST' -> 'East 84th Street, Brooklyn, NY' when the shapes line up:
+    same direction prefix, same street type, and the heard ordinal's digits
+    are a strict suffix of the row ordinal's digits ('4' in '84'). Returns ''
+    when no row side supports a correction - never guesses."""
+    _DIR = {"e": "East", "w": "West", "n": "North", "s": "South",
+            "east": "East", "west": "West", "north": "North", "south": "South"}
+    m = re.match(r"^\s*(\d+\s+)?(?:(east|west|north|south|e|w|n|s)\s+)?"
+                 r"(\d+)(?:st|nd|rd|th)?\s+(street|st|avenue|ave|road|rd|boulevard|blvd)",
+                 heard_addr, re.I)
+    if not m:
+        return ""
+    house = (m.group(1) or "").strip()
+    heard_dir = (m.group(2) or "").lower()
+    heard_num = m.group(3)
+    heard_type = m.group(4).lower()
+    heard_type = {"st": "street", "ave": "avenue", "rd": "road", "blvd": "boulevard"}.get(
+        heard_type, heard_type)
+    tail = ""
+    mt = re.search(r",\s*(.*)$", heard_addr)
+    if mt:
+        tail = ", " + mt.group(1)
+    for loc, _borough in rows:
+        for side in re.split(r"\s+at\s+|&", loc):
+            sm = re.match(r"^\s*(?:(east|west|north|south|e|w|n|s)\s+)?"
+                          r"(\d+)(?:st|nd|rd|th)?\s*(street|st|avenue|ave|road|rd|boulevard|blvd)?",
+                          side, re.I)
+            if not sm:
+                continue
+            row_dir = (sm.group(1) or "").lower()
+            row_num = sm.group(2)
+            row_type = (sm.group(3) or heard_type).lower()
+            row_type = {"st": "street", "ave": "avenue", "rd": "road",
+                        "blvd": "boulevard"}.get(row_type, row_type)
+            _FULL = {"e": "east", "w": "west", "n": "north", "s": "south"}
+            if (_FULL.get(heard_dir, heard_dir) != _FULL.get(row_dir, row_dir)
+                    or heard_type != row_type):
+                continue
+            if len(row_num) > len(heard_num) and row_num.endswith(heard_num):
+                direction = _DIR.get(row_dir, "")
+                n = int(row_num)
+                suf = ("th" if 10 <= n % 100 <= 20
+                       else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
+                type_disp = {"street": "Street", "avenue": "Avenue", "road": "Road",
+                             "boulevard": "Boulevard"}.get(row_type, row_type.title())
+                street = f"{direction + ' ' if direction else ''}{row_num}{suf} {type_disp}"
+                corrected = f"{house + ' ' if house else ''}{street}{tail}"
+                logging.info("box address correction: '%s' -> '%s' (row '%s')",
+                             heard_addr, corrected, loc)
+                return corrected
+    return ""
 
 
 def _heard_box(excerpt: str) -> str | None:
@@ -759,6 +927,19 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 logging.info("[%s] address canonicalized: %s -> %s", profile, hit["address"], fixed_addr)
                 stats.event(profile, f"address canonicalized: {hit['address']} -> {fixed_addr}")
                 hit["address"] = fixed_addr
+    if (not verified and cross and GEOCODE_VERIFY
+            and not re.match(r"^\s*\d", hit["address"])):
+        # bare street ('53rd Street' + crosses '15th & 16th Avenue') - the
+        # spoken intersection itself is the place; verify it on the map
+        pt = await _intersection_point(hit["address"], cross)
+        if pt[0] is not None:
+            lat, lon = pt
+            verified = True
+            verified_label = re.sub(r",", f" at {cross.split('&', 1)[0].strip()},",
+                                    hit["address"], count=1)
+            mloc = re.search(r",\s*([A-Za-z ]+),\s*NY", hit["address"])
+            locality = mloc.group(1).strip() if mloc else locality
+            stats.event(profile, f"verified via intersection (map): {verified_label}")
     if not verified and cross and GEOCODE_VERIFY:
         corrected = await _correct_street_via_crosses(hit["address"], cross)
         if corrected and corrected.lower() != hit["address"].lower():
@@ -785,6 +966,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             logging.warning("colony match failed: %s", e)
     box_disp = ""
     box_loc = ""
+    box_mismatch = False
     if box_task is not None:
         try:
             rows = await box_task
@@ -812,7 +994,29 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                                      f"Box {heard} - {box_loc}")
                 ops_log(f"box as proximity (address unconfirmed): Box {heard} - {box_loc} "
                         f"for {hit['address']}")
-            if not box_disp:
+            if not box_disp and verified:
+                # user verdict 9/28: never drop the box - it anchors. First try a
+                # box-supported address correction (whisper ordinal digit-drop:
+                # heard 'east 4th st', box row 'AVE M at E 84 ST' -> 'East 84th
+                # Street'); else post the box + its location with a mismatch flag
+                corrected_addr = _box_address_correction(hit["address"], rows)
+                if corrected_addr:
+                    stats.event(profile, f"address corrected via box: "
+                                         f"{hit['address']} -> {corrected_addr} (Box {heard})")
+                    ops_log(f"address corrected via box: {hit['address']} -> {corrected_addr} "
+                            f"(Box {heard})")
+                    hit["address"] = corrected_addr
+                    box_disp = heard
+                else:
+                    pick = next((l for l, b in rows
+                                 if locality and b.lower() == locality.lower()), rows[0][0])
+                    box_disp = heard
+                    box_loc = re.sub(r"\bAt\b", "at", pick.title())
+                    box_mismatch = True
+                    stats.event(profile, f"box kept despite mismatch: Box {heard} - {box_loc} "
+                                         f"vs {hit['address']}")
+                    ops_log(f"box kept despite mismatch: Box {heard} - {box_loc} vs {hit['address']}")
+            elif not box_disp:
                 logging.info("[%s] box mismatch: heard Box %s, lookup %s", profile, heard, rows)
                 stats.event(profile, f"box mismatch (not posted): heard {heard}, lookup "
                             + "; ".join(f"{l} ({b})" for l, b in rows))
@@ -821,8 +1025,36 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         elif heard:
             logging.info("[%s] box %s not in lookup DB - not posted", profile, heard)
             stats.event(profile, f"box {heard} not in lookup DB (not posted)")
+    # user rules 9/28 13:12 ("the deal"): ADDRESS MANDATORY on every post -
+    # unconfirmed with no box anchor does not go out ("no such a thing a
+    # address doesn't get posted"); BOX ON EVERY FDNY POST - no heard box ->
+    # closest box to the address; no box obtainable -> the job does not post.
+    if not verified and not box_disp:
+        logging.info("[%s] suppressed (unconfirmed address, no box anchor): %s",
+                     profile, hit["address"])
+        stats.event(profile, f"suppressed (unconfirmed, no box): {hit['nature']} @ {hit['address']}")
+        ops_log(f"suppressed (unconfirmed, no box): {hit['nature']} @ {hit['address']}")
+        return "suppressed"
+    box_closest = False
+    if profile == "fdny" and not box_disp:
+        nb_digits = nb_loc = None
+        if verified and lat is not None and lon is not None:
+            nb_digits, nb_loc, _ = await _nearest_box(lat, lon, locality)
+        if nb_digits:
+            box_disp = nb_digits
+            box_closest = True
+            stats.event(profile, f"closest box lookup: Box {nb_digits} - {nb_loc} "
+                                 f"for {hit['address']}")
+            ops_log(f"closest box lookup: Box {nb_digits} - {nb_loc} for {hit['address']}")
+        else:
+            logging.info("[%s] suppressed (FDNY, no box obtainable): %s @ %s",
+                         profile, hit["nature"], hit["address"])
+            stats.event(profile, f"suppressed (no box obtainable): {hit['nature']} @ {hit['address']}")
+            ops_log(f"suppressed (no box obtainable): {hit['nature']} @ {hit['address']}")
+            return "suppressed"
     text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony,
-                            box=box_disp, box_loc=box_loc)
+                            box=box_disp, box_loc=box_loc, box_mismatch=box_mismatch,
+                            box_closest=box_closest)
     ogg = None
     if ogg_task is not None:
         try:
@@ -853,7 +1085,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
 
 
 def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
-                 footer: str | None = None, box: str = "", box_loc: str = "") -> str:
+                 footer: str | None = None, box: str = "", box_loc: str = "",
+                 box_mismatch: bool = False, box_closest: bool = False) -> str:
     """User-picked layout (9/28, option 1): bold caps nature header with fire
     emoji; bold pinned address; plain 'between X & Y' crosses line; time;
     italic source footer at the very bottom. No transcript quote, ever.
@@ -868,9 +1101,13 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         lines.append(f"between {crosses}")
     if box:
         line = f"\N{PAGER} Box {box}"
+        if box_closest:
+            line += " (closest)"
         if box_loc:
             line += f" - {box_loc}"
         lines.append(line)
+        if box_mismatch:
+            lines.append("\N{WARNING SIGN} spoken address not at box location")
     lines += ["", f"\N{CLOCK FACE ONE OCLOCK} {now}"]
     label = footer or SOURCE_LABEL.get(hit["source"], hit["source"])
     lines.append(f"_{label}_")
