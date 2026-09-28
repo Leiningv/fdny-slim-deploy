@@ -442,13 +442,19 @@ async def _intersection_point(address: str, cross: str) -> tuple:
     if not street or not parts:
         return None, None
     _T = r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln|Parkway|Pkwy|Court|Ct|Terrace|Ter)"
-    typ = re.search(rf"\b{_T}\b", parts[-1], re.I)
-    fixed = []
-    for p in parts:
-        if typ and not re.search(rf"\b{_T}\b", p, re.I):
-            p = f"{p} {typ.group(0)}"
-        fixed.append(p)
-    names = [street] + fixed
+    # A dispatcher may omit the first suffix ("Coleridge and Hampton Avenue").
+    # Try plausible typed variants; verify by an ACTUAL shared OSM node,
+    # rather than trusting a fuzzy hit on the second street alone.
+    alt = []
+    for p in ([street] + parts if "&" not in street else street.split("&", 1)):
+        p = p.strip()
+        if re.search(rf"\b{_T}\b", p, re.I):
+            alt.append([p])
+        else:
+            alt.append([f"{p} {suffix}" for suffix in
+                        ("Street", "Avenue", "Road", "Boulevard", "Place",
+                         "Drive", "Court", "Terrace", "Lane")])
+    names = list(dict.fromkeys([x for group in alt for x in group]))
     pat = "^(" + "|".join(re.escape(n) for n in names) + ")$"
     hdrs = {"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"}
     q = f'[out:json][timeout:15];way["name"~"{pat}",i](40.55,-74.06,40.75,-73.85);out geom;'
@@ -472,15 +478,31 @@ async def _intersection_point(address: str, cross: str) -> tuple:
         for g in el.get("geometry") or []:
             nodes.setdefault(nm, {})[(round(g.get("lat", 0), 6),
                                       round(g.get("lon", 0), 6))] = (g.get("lat"), g.get("lon"))
+    if "&" in street:
+        # Address itself is the intersection: both sides must meet spatially.
+        for left in alt[0]:
+            own = nodes.get(left.strip().lower()) or {}
+            for right in alt[1]:
+                other = nodes.get(right.strip().lower()) or {}
+                shared = set(own) & set(other)
+                if shared:
+                    return own[sorted(shared)[0]]
+                # OSM splits crossing ways at independently rounded nodes on
+                # map exports; tight ~25m snap is acceptable when map names
+                # identify both roads, never one road alone.
+                for a in own.values():
+                    for z in other.values():
+                        if abs(a[0] - z[0]) < 0.00017 and abs(a[1] - z[1]) < 0.00023:
+                            return ((a[0]+z[0])/2, (a[1]+z[1])/2)
+        return None, None
     own = nodes.get(street.lower()) or {}
     if not own:
         return None, None
-    for p in fixed:
+    for p in names[1:]:
         shared = set(own) & set(nodes.get(p.lower()) or {})
         if shared:
             return own[sorted(shared)[0]]
     return None, None
-
 
 async def _correct_street_via_crosses(heard_addr: str, cross: str) -> str:
     """User rule 9/28: when the heard street can't be confirmed but the cross
@@ -997,7 +1019,17 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     lat = lon = None
     locality = ""
     if GEOCODE_VERIFY:
-        verified, in_sullivan, verified_label, lat, lon, locality = await geocode_verify(hit["address"], profile)
+        # Intersections require BOTH spoken roads at one point. The ordinary
+        # geocoder can otherwise certify the first street only.
+        spoken_location = hit["address"].split(",")[0]
+        if " & " in spoken_location and not re.match(r"^\d+\s", spoken_location):
+            side_a, side_b = (p.strip() for p in spoken_location.split("&", 1))
+            lat, lon = await _intersection_point(spoken_location, side_b)
+            verified = lat is not None
+            verified_label = hit["address"] if verified else ""
+            locality = hit["address"].split(",")[1].strip() if verified and "," in hit["address"] else ""
+        else:
+            verified, in_sullivan, verified_label, lat, lon, locality = await geocode_verify(hit["address"], profile)
         if (verified and locality and profile.lower().startswith(("hatzalah", "zello-hatzalah"))
                 and locality.lower() not in ("brooklyn", "queens", "manhattan", "bronx", "new york")):
             fixed = re.sub(r",\s*[^,]+,\s*NY$", f", {locality}, NY", hit["address"])
@@ -1013,6 +1045,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if not verified:
             stats.event(profile, f"unconfirmed address: {hit['address']}")
     cross = (hit.get("cross") or "").strip()
+    if " & " in hit["address"].split(",")[0] and cross.lower() == hit["address"].split(",")[0].lower():
+        cross = ""  # the spoken intersection already IS the location line
     if cross and "&" not in cross and lat is not None and lon is not None \
             and verified_label:
         # single spoken cross ('off Woodbine Street') - complete the pair
@@ -1220,7 +1254,15 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     addr_line = f"\N{ROUND PUSHPIN} *{hit['address']}*"
     if not confirmed:
         addr_line += " (not confirmed)"
-    lines = [f"*\N{FIRE} {nature}*", "", addr_line]
+    medical = re.search(
+        r"\b(?:breath(?:ing)?|cardiac|arrest|cpr|unresponsive|responsive|chok|"
+        r"overdose|stroke|cva|seizure|convuls|fall|fell|bleeding|hemorrhage|"
+        r"chest pain|drown|syncope|faint|passed out|diabet|sugar|allergic|"
+        r"anaphyla|bee sting|abdominal|stomach|altered|disoriented|"
+        r"unconscious|aided|trauma|ped(?:estrian)?|mva|mvc|accident|"
+        r"collision|rollover|entrap)\w*\b", nature, re.I)
+    icon = "\N{AMBULANCE}" if medical else "\N{FIRE}"
+    lines = [f"*{icon} {nature}*", "", addr_line]
     if crosses:
         lines.append(f"between {crosses}" if "&" in crosses else f"off {crosses}")
     if box:

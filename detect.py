@@ -426,6 +426,14 @@ def extract_audio_crosses(text: str) -> str | None:
         r = _pair(m.group(1), m.group(2))
         if r:
             return r
+    # Location pair spoken with only the second street typed: "for Coleridge
+    # and Hampton Avenue". Accept only an address-introducing preposition,
+    # and reject dispatcher filler on the bare side.
+    m = re.search(rf"\b(?:for|at|on|of|in)\s+({_BARE})\s+and\s+({_ANCH})\b", t, re.I)
+    if m:
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
     # anchored to anchored: "Glenwood Road to Avenue H"
     m = re.search(rf"({_ANCH})\s+to\s+({_ANCH})\b", t, re.I)
     if m:
@@ -785,15 +793,13 @@ def get_nature(text: str, profile: str = "") -> str:
     # 'gas main (struck|ruptured|...)' is a content nature - box 3321 (9/28)
     # posted PHONE ALARM when 'a gas main that was ruptured by a contractor'
     # was said; box 2720 ('gas main struck') suppressed no-nature same hour
+    v = vt(r"\bfumes?\b")
+    if v: return v
     m_gas = re.search(r"\bgas main\b", t)
     if m_gas:
         mp = re.search(r"\b(ruptured|struck|hit|broken|leaking|leak)\b",
                        t[m_gas.end(): m_gas.end() + 40])
         return _addr_title("gas main " + mp.group(1)) if mp else "Gas Main"
-    # 'bus' on the Hatzolah channel = ambulance ('any units for a bus?')
-    if ("hatzal" in profile.lower() or "hatzol" in profile.lower()) \
-            and re.search(r"\bbus\b", t):
-        return "EMS"
     # bare-word fire fallback is FDNY-only: on the EMS channel a lone whisper
     # 'fire' is a hallucination until proven ('I can't have fake coming thru'
     # 9/28) - Hatzalah fire jobs still match the structured patterns above
@@ -974,7 +980,14 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         return None
     if is_chatter(t):
         return None
-    addr = extract_dispatch_address(t, profile)
+    # A spoken location intersection outranks the lone typed street that a
+    # generic address regex would otherwise extract (Hampton job 9/28).
+    spoken_pair = extract_audio_crosses(t) if profile != "fdny" else None
+    if spoken_pair and "&" in spoken_pair and re.search(
+            r"\b(?:for|at|on|of|in)\s+", t, re.I):
+        addr = _with_area(spoken_pair, profile, t)
+    else:
+        addr = extract_dispatch_address(t, profile)
     if not addr and head_over:
         place = head_over.group(1).split(".")[0].strip(" ,")
         if len(place) >= 3:
@@ -1036,6 +1049,10 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     apt = extract_apartment(t)
     if apt and nature:
         nature = f"{nature}, {apt}"
+    fl = re.search(r"\bthe\s+((?:first|second|third|fourth|fifth|sixth|"
+                   r"seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th))\s+floor)\b", t)
+    if fl and nature and fl.group(1).lower() not in nature.lower():
+        nature = f"{nature}, {_addr_title(fl.group(1))}"
     return {
         "source": source,
         "nature": nature,
