@@ -201,7 +201,10 @@ def _addr_title(s: str) -> str:
     (str.title gives '53Rd' - shipped in the 6:01 AM 53rd St post 9/28)."""
     t = s.title()
     t = re.sub(r"\b(\d+)(St|Nd|Rd|Th)\b", lambda m: m.group(1) + m.group(2).lower(), t)
-    return re.sub(r"\bAnd\b", "and", t)
+    t = re.sub(r"'S\b", "'s", t)
+    t = re.sub(r"(?<!^)\b(In|An?|Of|The|And|Or|At|On|For)\b",
+               lambda m: m.group(1).lower(), t)
+    return t
 
 
 def _format_cross_street_part(num_ord: str, street_type: str) -> str:
@@ -329,7 +332,7 @@ _NAME_STOP = {
     "be", "unit", "units", "engine", "ladder", "battalion", "rescue", "squad",
     "truck", "box", "alarm", "phone", "still", "code", "signal", "from",
     "with", "of", "by", "go", "no", "we", "you", "your", "rd", "st", "nd",
-    "th", "ave", "man",
+    "th", "ave", "man", "that", "thats", "off", "corner", "near", "next",
 }
 
 
@@ -510,6 +513,22 @@ _LONE_STREET_RE = re.compile(
 def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None:
     """Best-effort dispatch location for one transcript chunk."""
     if profile == "fdny":
+        # house number on a named street ('710 Grand Street') is the dispatch
+        # address; it beats the 'that's off X and Y' named-cross glue (710
+        # Grand St posted as 'That'S Off Manhattan Ave & Graham Ave' 9/28)
+        hn = re.search(
+            r"\b(\d{1,5})\s+([a-z][a-z'\-]*(?:\s+[a-z][a-z'\-]*){0,2})\s+"
+            r"(street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
+            r"lane|ln|parkway|pkwy)\b", _norm(text).lower())
+        if hn and hn.group(2) not in _NAME_STOP:
+            typ = {"st": "street", "ave": "avenue", "rd": "road", "dr": "drive",
+                   "blvd": "boulevard", "pl": "place", "ln": "lane",
+                   "pkwy": "parkway"}.get(hn.group(3), hn.group(3))
+            return _with_area(f"{hn.group(1)} {_addr_title(hn.group(2) + ' ' + typ)}",
+                              profile, text)
+        num0 = _FIRE_NUM_DISPATCH_RE.search(text)
+        if num0:
+            return _with_area(f"{num0.group(1)} {_addr_title(num0.group(2).strip())}", profile, text)
         named = extract_named_cross(text)
         if named:
             return _with_area(named, profile, text)
@@ -549,91 +568,96 @@ def _negative_fire_context(t: str) -> bool:
 
 
 def get_nature(text: str, profile: str = "") -> str:
+    """Nature = the dispatcher's own words (user ruling 9/28 13:32: 'Fire in a
+    private dwelling should be fire in a private dwelling') - verbatim as
+    spoken, no rewording/normalizing/label swaps; only whisper garbage is
+    cleaned. Returns the matched phrase ('' when nothing is discernible).
+    Cascade order is unchanged: content natures beat transmission types."""
     t = text.lower()
     # 'firefighter(s)' on scene is not a fire nature (53rd St Hatzolah EMS job
     # posted as 'Fire' 9/28 off a whisper 'Firefight 253' fragment)
     t = re.sub(r"firefight(?:er|ers|ing)?", " ", t)
-    if any(x in t for x in ["all hands", "10-75", "10 75", "working fire", "second alarm"]):
-        return "All Hands Fire"
-    if re.search(r"\b(?:ped|pedestrian)\s+(?:struck|stricken|hit)\b", t):
-        return "Pedestrian Struck"
-    if re.search(r"\b(?:mva|mvc|motor vehicle accident|rollover|entrapment|car accident|auto accident|vehicle accident)\b", t):
-        return "MVA"
-    if any(x in t for x in ["difficulty breathing", "trouble breathing", "shortness of breath",
-                            "can't breathe", "cant breathe", "cannot breathe", "not breathing",
-                            "respiratory distress", "turning blue"]):
-        return "Difficulty Breathing"
-    if re.search(r"\b(?:cardiac arrest|heart attack|full arrest|cpr in progress)\b", t):
-        return "Cardiac Arrest"
-    if re.search(r"\b(?:unresponsive|not responsive)\b", t):
-        return "Unresponsive"
-    if re.search(r"\bchok(?:ing|e)\b", t):
-        return "Choking"
-    if re.search(r"\b(?:overdose|o\.d\.|narcotic)\b", t):
-        return "Overdose"
-    if re.search(r"\b(?:accident|collision|crash)\b", t):
-        return "MVA"
-    if re.search(r"\b(?:stroke|cva)\b", t):
-        return "Stroke"
-    if re.search(r"\b(?:seizure|convuls)\b", t):
-        return "Seizure"
-    if re.search(r"\bfall\b|\bfell\b", t):
-        return "Fall"
-    if re.search(r"\b(?:bleeding|hemorrhage)\b", t):
-        return "Bleeding"
-    if re.search(r"\bchest pain\b", t):
-        return "Chest Pain"
-    if re.search(r"\bdrown", t):
-        return "Drowning"
-    if re.search(r"\bsyncope\b|\bfainted\b|\bpassed out\b", t):
-        return "Syncope"
-    if re.search(r"\bdiabet|\blow (?:blood )?sugar\b|\bhigh (?:blood )?sugar\b", t):
-        return "Diabetic Emergency"
-    if re.search(r"\ballergic\b|\banaphyla|\bbee sting\b", t):
-        return "Allergic Reaction"
-    if re.search(r"\babdominal\b|\bstomach pain\b", t):
-        return "Abdominal Pain"
-    if re.search(r"\baltered mental\b|\b(?:pationt|patient)?\s*ams\b|\bdisoriented\b", t):
-        return "Altered Mental Status"
-    if re.search(r"\bfire\s+in\s+a\s+private\s+dwelling\b|\bprivate\s+dwelling\s+fire\b", t):
-        return "Private Dwelling Fire"
-    if re.search(r"\bstructure fire\b|\bbuilding fire\b|\bhouse fire\b", t):
-        return "Structure Fire"
-    if re.search(r"\bkitchen fire\b", t):
-        return "Kitchen Fire"
-    if re.search(r"\bcar fire\b|\bvehicle fire\b|\bauto fire\b", t):
-        return "Car Fire"
-    if re.search(r"\btrauma\b", t):
-        return "Full Trauma"
-    if re.search(r"\bunconscious\b", t):
-        return "Unconscious"
-    if re.search(r"(?<![\d-])\bcode\b(?!\s*\d)", t):
-        return "Code"
-    if re.search(r"\bwater condition\b|\bwater leak\b|\bburst pipe\b", t):
-        return "Water Condition"
-    if re.search(r"\bsprinkler", t):
-        return "Sprinkler Activation"
-    if re.search(r"\bmanhole\b", t):
-        return "Manhole"
-    if re.search(r"\belectrical\b|\bwires down\b|\btransformer\b", t):
-        return "Electrical"
-    if re.search(r"\belevator\b", t):
-        return "Elevator Emergency"
-    if re.search(r"\bco alarm\b|\bcarbon monoxide\b", t):
-        return "CO Alarm"
-    if re.search(r"\brubbish\b|\bgarbage fire\b|\btrash fire\b", t):
-        return "Rubbish Fire"
-    if re.search(r"\boutside fire\b|\bbrush fire\b", t):
-        return "Outside Fire"
-    if re.search(r"\baided\b", t):
-        return "Aided Case"
-    # content natures beat alarm-type fallbacks: a phone/automatic alarm FOR an
-    # odor of gas must post the gas nature, not the transmission type (9903
-    # Flatlands 9/28 posted 'PHONE ALARM (FIRE)' over a spoken gas odor)
-    if re.search(r"\bodou?r of gas\b", t):
-        return "Odor of Gas"
-    if re.search(r"\bgas leak\b", t):
-        return "Gas Leak"
+
+    def vt(pattern: str) -> str:
+        m = re.search(pattern, t)
+        return _addr_title(m.group(0)) if m else ""
+
+    v = vt(r"\b(?:all hands|10-75|10 75|working fire|second alarm)\b")
+    if v: return v
+    v = vt(r"\b(?:ped|pedestrian)\s+(?:struck|stricken|hit)\b")
+    if v: return v
+    v = vt(r"\b(?:mva|mvc|motor vehicle accident|rollover|entrapment|car accident|auto accident|vehicle accident)\b")
+    if v: return v
+    v = vt(r"difficulty breathing|trouble breathing|shortness of breath|can't breathe|cant breathe|cannot breathe|not breathing|respiratory distress|turning blue")
+    if v: return v
+    v = vt(r"\b(?:cardiac arrest|heart attack|full arrest|cpr in progress)\b")
+    if v: return v
+    v = vt(r"\b(?:unresponsive|not responsive)\b")
+    if v: return v
+    v = vt(r"\bchok(?:ing|e)\b")
+    if v: return v
+    v = vt(r"\b(?:overdose|o\.d\.|narcotic)\b")
+    if v: return v
+    v = vt(r"\b(?:accident|collision|crash)\b")
+    if v: return v
+    v = vt(r"\b(?:stroke|cva)\b")
+    if v: return v
+    v = vt(r"\b(?:seizure|convuls\w*)\b")
+    if v: return v
+    if re.search(r"\b(?:fall|fell)\b", t):
+        return "Fall"  # tense cleanup only; Hatzalah 'Fall' exclusion depends on it
+    v = vt(r"\b(?:bleeding|hemorrhage)\b")
+    if v: return v
+    v = vt(r"\bchest pain\b")
+    if v: return v
+    v = vt(r"\bdrown\w*\b")
+    if v: return v
+    v = vt(r"\b(?:syncope|fainted|passed out)\b")
+    if v: return v
+    v = vt(r"\bdiabet\w*\b|\b(?:low|high)\s+(?:blood\s+)?sugar\b")
+    if v: return v
+    v = vt(r"\ballergic\b|\banaphyla\w*\b|\bbee sting\b")
+    if v: return v
+    v = vt(r"\babdominal\b|\bstomach pain\b")
+    if v: return v
+    v = vt(r"\baltered mental\b|\b(?:pationt|patient)?\s*ams\b|\bdisoriented\b")
+    if v: return v
+    v = vt(r"\bfire\s+in\s+a\s+private\s+dwelling\b|\bprivate\s+dwelling\s+fire\b")
+    if v: return v
+    v = vt(r"\b(?:structure|building|house)\s+fire\b")
+    if v: return v
+    v = vt(r"\bkitchen fire\b")
+    if v: return v
+    v = vt(r"\b(?:car|vehicle|auto)\s+fire\b")
+    if v: return v
+    v = vt(r"\btrauma\b")
+    if v: return v
+    v = vt(r"\bunconscious\b")
+    if v: return v
+    v = vt(r"(?<![\d-])\bcode\b(?!\s*\d)")
+    if v: return v
+    v = vt(r"\b(?:water condition|water leak|burst pipe)\b")
+    if v: return v
+    v = vt(r"\bsprinkler\w*\b")
+    if v: return v
+    v = vt(r"\bmanhole\b")
+    if v: return v
+    v = vt(r"\b(?:electrical|wires down|transformer)\b")
+    if v: return v
+    v = vt(r"\belevator\b")
+    if v: return v
+    v = vt(r"\b(?:co alarm|carbon monoxide)\b")
+    if v: return v
+    v = vt(r"\b(?:rubbish|rubbish fire|garbage fire|trash fire)\b")
+    if v: return v
+    v = vt(r"\b(?:outside fire|brush fire)\b")
+    if v: return v
+    v = vt(r"\baided\b")
+    if v: return v
+    v = vt(r"\bodou?r of gas\b")
+    if v: return v
+    v = vt(r"\bgas leak\b")
+    if v: return v
     # 'bus' on the Hatzolah channel = ambulance ('any units for a bus?')
     if ("hatzal" in profile.lower() or "hatzol" in profile.lower()) \
             and re.search(r"\bbus\b", t):
@@ -641,21 +665,21 @@ def get_nature(text: str, profile: str = "") -> str:
     # bare-word fire fallback is FDNY-only: on the EMS channel a lone whisper
     # 'fire' is a hallucination until proven ('I can't have fake coming thru'
     # 9/28) - Hatzalah fire jobs still match the structured patterns above
-    if "hatzal" not in profile.lower() and "hatzol" not in profile.lower() \
-            and re.search(r"\b(?:fire|smoke|burning)\b(?!\s*—)", t) \
-            and not _negative_fire_context(t):
-        return "Fire" if re.search(r"\bfire\b(?!\s*—)", t) or "burning" in t else "Smoke Condition"
+    if "hatzal" not in profile.lower() and "hatzol" not in profile.lower():
+        m = re.search(r"\b(?:fire|smoke|burning)\b(?!\s*—)", t)
+        if m and not _negative_fire_context(t):
+            return _addr_title(m.group(0))
     # transmission-type fallbacks are LAST RESORT - content natures above
     # always win ('phone alarm... fire in a private dwelling' must post the
     # fire, not the alarm type; 6:04 AM E 84th St job 9/28)
-    if re.search(r"\b(?:fire|smoke|automatic|smoke detector|co)\s+alarm\b|\balarm activation\b|\bclass\s*3\b", t):
-        return "Automatic Alarm"
-    if re.search(r"\bstill alarm\b", t):
-        return "Still Alarm"
-    if "phone alarm" in t:
-        return "Phone Alarm (Fire)"
-    if re.search(r"\b(?:ems|ambulance|sick person|medical emergency|aided)\b", t):
-        return "EMS"
+    v = vt(r"\b(?:fire|smoke|automatic|smoke detector|co)\s+alarm\b|\balarm activation\b|\bclass\s*3\b")
+    if v: return v
+    v = vt(r"\bstill alarm\b")
+    if v: return v
+    v = vt(r"\bphone alarm\b")
+    if v: return v
+    v = vt(r"\b(?:ems|ambulance|sick person|medical emergency)\b")
+    if v: return v
     return ""
 
 
@@ -780,6 +804,11 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     # type token; type-less names like 'Broadway' survive (no digit/'The').
     _T_ANY = (r"\b(?:street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
               r"lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter)\b")
+    if re.match(r"^(?:the\s+)?(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|"
+                r"place|pl|lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter)\s*$",
+                street_part, re.I):
+        logging.info("suppressed (type-only address): %s", addr)
+        return None
     if not re.search(_T_ANY, street_part, re.I) \
             and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
         logging.info("suppressed (no street type): %s", addr)
@@ -794,11 +823,21 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                  r"Drive|Dr|Place|Pl|Lane|Ln)$", street_part):
         logging.info("suppressed (dangling intersection address): %s", addr)
         return None
+    cross = extract_audio_crosses(t)
+    if cross:
+        # the incident address is never its own cross street ('218 Union
+        # Street & Henry Street' posted 6:26 AM 9/28 - dispatch gave the
+        # address, then one real cross)
+        addr_core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", addr.split(",")[0]).strip().lower()
+        parts = [p.strip() for p in cross.split("&")]
+        parts = [p for p in parts
+                 if re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", p).strip().lower() != addr_core]
+        cross = " & ".join(parts) if len(parts) == 2 else None
     return {
         "source": source,
         "nature": get_nature(t, profile),
         "address": addr,
         "excerpt": t[:280],
         "priority": is_priority(t),
-        "cross": extract_audio_crosses(t),
+        "cross": cross,
     }
