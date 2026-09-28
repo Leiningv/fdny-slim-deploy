@@ -414,7 +414,9 @@ def extract_audio_crosses(text: str) -> str | None:
         ws = name.split()
         if not (1 <= len(ws) <= 3) or len(name) > 32:
             return False
-        if any(w.lower() in _STOP1 for w in ws):
+        if any(w.lower() in _STOP1 and not
+               (w.lower() == "a" and len(ws) == 2 and ws[0].lower() in ("avenue", "ave"))
+               for w in ws):
             return False
         return all(w[0].isupper() or w[0].isdigit() for w in ws)
 
@@ -1048,12 +1050,15 @@ def _merge_split_ordinals(t: str) -> str:
 
 _PHONETIC = {"adam": "A", "alpha": "A", "boy": "B", "baker": "B", "bravo": "B",
              "charles": "C", "charlie": "C", "david": "D", "edward": "E",
-             "frank": "F", "george": "G", "henry": "H", "henry": "H", "ida": "I",
+             "frank": "F", "george": "G", "henry": "H", "ida": "I",
              "john": "J", "king": "K", "lincoln": "L", "mary": "M", "mike": "M",
              "nora": "N", "ocean": "O", "peter": "P", "queen": "Q",
              "robert": "R", "romeo": "R", "sam": "S", "tom": "T", "union": "U",
              "victor": "V", "william": "W", "x-ray": "X", "xray": "X",
              "young": "Y", "zebra": "Z"}
+# The Hatzalah address alphabet is separate from the FDNY apartment phonetics.
+# An absent Hatzalah street letter does not revoke the FDNY's spoken apartment.
+
 
 
 def extract_apartment(text: str) -> str:
@@ -1101,13 +1106,23 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         profile = "hatzolah"
     t = _merge_split_ordinals(_split_box_glue(_norm(text)))
     if profile == "hatzolah":
-        # User-confirmed Hatzalah street-letter words. Scope to Avenue +
-        # word so a person's name never becomes a street. Do not invent the
-        # rest of the chapter's phonetic alphabet before the user teaches it.
-        t = re.sub(r"\b(?:Avenue|Ave)\s+(?:Nachman|Ackman)\b",
-                   "Avenue N", t, flags=re.I)
-        t = re.sub(r"\b(?:Avenue|Ave)\s+Adam\b",
-                   "Avenue A", t, flags=re.I)
+        # User-confirmed Hatzalah street-letter words. Replace only in an
+        # avenue name, never an ordinary name or unrelated speech. Other
+        # existing phonetics for FDNY apartments do not authorize new streets.
+        street_letters = {
+            "adam": "A", "charlie": "C", "david": "D", "henry": "H",
+            "ida": "I", "john": "J", "king": "K", "larry": "L",
+            "moshe": "M", "mary": "M", "nachman": "N", "nancy": "N",
+            "ackman": "N",  # heard ASR variant of Nachman
+            "oscar": "O", "peter": "P", "robert": "R", "sam": "S",
+            "tomas": "T", "union": "U", "victor": "V", "william": "W",
+            "x-ray": "X", "xray": "X", "ex ray": "X", "yellow": "Y",
+        }
+        t = re.sub(
+            r"\b(?:Avenue|Ave)\s+(?:" + "|".join(
+                sorted(map(re.escape, street_letters), key=len, reverse=True)) + r")\b",
+            lambda m: "Avenue " + street_letters[m.group().split(maxsplit=1)[1].lower()],
+            t, flags=re.I)
     terminal_street = None
     raw_input = _norm(text)
     if profile == "fdny":
@@ -1297,4 +1312,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
-    }
+                                  }
