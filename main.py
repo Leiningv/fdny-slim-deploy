@@ -1168,6 +1168,20 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             return "suppressed"
         if not verified:
             stats.event(profile, f"unconfirmed address: {hit['address']}")
+    # A directly spoken X and Y pair: keep the verified first street if the
+    # map cannot prove the second at a real intersection. The map-verification
+    # result controls the printed second side; no fuzzy substitution.
+    direct_candidate = (hit.get("direct_cross_candidate") or "").strip()
+    if direct_candidate and verified:
+        pair_point = await _intersection_point(hit["address"], direct_candidate)
+        if pair_point[0] is not None:
+            hit["address"] = hit["address"].replace(
+                hit["address"].split(",", 1)[0],
+                f"{hit['address'].split(',', 1)[0]} & {direct_candidate}", 1)
+            lat, lon = pair_point
+            stats.event(profile, f"spoken intersection map-verified: {hit['address']}")
+        else:
+            stats.event(profile, f"spoken second street unverified: {direct_candidate}")
     cross = (hit.get("cross") or "").strip()
     if " & " in hit["address"].split(",")[0] and cross.lower() == hit["address"].split(",")[0].lower():
         cross = ""  # the spoken intersection already IS the location line
@@ -1369,7 +1383,20 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             nb_digits, nb_loc, _ = await _nearest_box(lat, lon, locality)
         if nb_digits:
             box_disp = nb_digits
-            box_closest = True
+            # When the selected box's documented street corroborates this
+            # verified address, don't label it "closest" (user's 1610 ruling).
+            def _box_road_key(street):
+                road = _street_core(street).lower()
+                for suffix, long in ((" pl", " place"), (" ave", " avenue"),
+                                     (" st", " street"), (" rd", " road"),
+                                     (" blvd", " boulevard"), (" dr", " drive")):
+                    if road.endswith(suffix):
+                        road = road[:-len(suffix)] + long
+                return road
+            own_street = _box_road_key(hit["address"])
+            row_streets = {_box_road_key(part) for part in
+                           re.split(r"\s+at\s+|&", nb_loc or "", flags=re.I)}
+            box_closest = not (own_street and own_street in row_streets)
             stats.event(profile, f"closest box lookup: Box {nb_digits} - {nb_loc} "
                                  f"for {hit['address']}")
             ops_log(f"closest box lookup: Box {nb_digits} - {nb_loc} for {hit['address']}")
@@ -1451,7 +1478,8 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     lines += ["", f"\N{CLOCK FACE ONE OCLOCK} {now}"]
     label = footer or SOURCE_LABEL.get(hit["source"], hit["source"])
     lines.append(f"_{label}_")
-    return "\n".join(lines)
+    # Presentation only: keep the spoken transcript and structured hit unchanged.
+    return re.sub(r"\bpatient\b", "PTT", "\n".join(lines), flags=re.I)
 
 
 def _concat_pcm(a: Path, b: Path, out: Path) -> bool:
