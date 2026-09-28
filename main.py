@@ -52,6 +52,25 @@ async def _kw_check(profile: str, text: str) -> None:
         ops_log(f"\U0001F440 watch hit [{profile}] ({', '.join(hits)}): {text[:200]}")
 
 
+async def _uguu_upload(path: Path) -> str:
+    """Upload the voice-note OGG to uguu.se (free, permanent) -> durable URL."""
+    try:
+        data = aiohttp.FormData()
+        data.add_field("files[]", path.read_bytes(), filename=path.name,
+                       content_type="audio/ogg")
+        async with aiohttp.ClientSession() as s:
+            async with s.post("https://uguu.se/upload?output=json", data=data,
+                              timeout=aiohttp.ClientTimeout(total=45)) as r:
+                d = await r.json(content_type=None)
+        url = str(((d.get("files") or [{}])[0]).get("url") or "")
+        if d.get("success") and url.startswith("https://"):
+            return url
+        logging.warning("uguu upload rejected: %s", str(d)[:200])
+    except Exception as e:  # noqa: BLE001
+        logging.warning("uguu upload failed: %s", e)
+    return ""
+
+
 async def _ops_flusher() -> None:
     while True:
         await asyncio.sleep(300)
@@ -677,7 +696,11 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if ogg:
             base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
             vok = await alert_waha.send_voice(f"{base}/audio/{ogg}")
-            if not vok:
+            if vok:
+                hit["voice_url"] = await _uguu_upload(ARCHIVE_DIR / ogg)
+                if not hit["voice_url"]:
+                    ops_log(f"archive upload failed (post ok): {hit['nature']} @ {hit['address']}")
+            else:
                 ops_log(f"voice-note send failed: {hit['nature']} @ {hit['address']}")
         else:
             ops_log(f"voice-note convert failed: {hit['nature']} @ {hit['address']}")
@@ -782,6 +805,7 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
                                             fresh_ts=wav.stat().st_mtime)
             ok = outcome == "sent"
             stats.mark_alert(profile, hit["nature"], hit["address"], ok,
+                             voice_url=hit.get("voice_url", ""),
                              failed=(outcome == "queued"), outcome=outcome)
             _append_alert_log({"t": now, "feed": profile, "nature": hit["nature"],
                                "address": hit["address"], "sent": ok,
@@ -865,7 +889,8 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
     outcome = await verify_and_send("fdny", hit, stats, clip_name, fresh_ts=call_ts)
     ok = outcome == "sent"
     stats.mark_alert("fdny", hit["nature"], hit["address"], ok,
-                     failed=(outcome == "queued"), outcome=outcome)
+                     failed=(outcome == "queued"), outcome=outcome,
+                     voice_url=hit.get("voice_url", ""))
     _append_alert_log({"t": now, "feed": "fdny", "nature": hit["nature"],
                        "address": hit["address"], "sent": ok,
                        "excerpt": hit["excerpt"]})

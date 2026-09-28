@@ -19,6 +19,7 @@ import html
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -51,7 +52,7 @@ class Stats:
             for a in json.loads(self._hist_file.read_text())[-500:]:
                 self.alerts.append({"t": a["t"], "feed": a["feed"], "nature": a["nature"],
                                     "address": a["address"], "sent": a["sent"],
-                                    "outcome": a.get("outcome", "")})
+                                    "outcome": a.get("outcome", ""), "voice": a.get("voice", "")})
         except Exception:
             pass
 
@@ -102,7 +103,7 @@ class Stats:
                                    "file": filename, "transcript": transcript[:200]})
 
     def mark_alert(self, profile: str, nature: str, address: str, ok: bool,
-                   failed: bool = True, outcome: str = "") -> None:
+                   failed: bool = True, outcome: str = "", voice_url: str = "") -> None:
         with self._lock:
             f = self.feed(profile)
             f["last_alert_at"] = time.time()
@@ -114,13 +115,13 @@ class Stats:
             out = outcome or ("sent" if ok else ("failed" if failed else "suppressed"))
             self.alerts.appendleft({"t": time.time(), "feed": profile,
                                     "nature": nature, "address": address, "sent": ok,
-                                    "outcome": out})
+                                    "outcome": out, "voice": voice_url})
             self.events.appendleft({"t": time.time(), "feed": profile,
                                     "msg": f"ALERT {out}: {nature} @ {address}"})
             try:
                 hist = [{"t": a["t"], "feed": a["feed"], "nature": a["nature"],
                          "address": a["address"], "sent": a["sent"],
-                         "outcome": a.get("outcome", "")}
+                         "outcome": a.get("outcome", ""), "voice": a.get("voice", "")}
                         for a in sorted(list(self.alerts), key=lambda x: -x["t"])[:500]]
                 self._hist_file.parent.mkdir(parents=True, exist_ok=True)
                 self._hist_file.write_text(json.dumps(hist))
@@ -167,7 +168,8 @@ class Stats:
                 "alert_history": [
                     {"ts": a["t"], "feed": a["feed"], "nature": a["nature"],
                      "address": a["address"], "sent": a["sent"],
-                     "outcome": a.get("outcome") or ("sent" if a["sent"] else "failed")}
+                     "outcome": a.get("outcome") or ("sent" if a["sent"] else "failed"),
+                     "voice": a.get("voice", "")}
                     for a in sorted(list(self.alerts), key=lambda x: -x["t"])[:500]
                 ],
                 "clips": [
@@ -279,6 +281,81 @@ setInterval(tick,5000);
 """
 
 
+def _archive_html(snap: dict) -> str:
+    def esc(x):
+        return html.escape(str(x))
+
+    def _fix_casing(addr: str) -> str:
+        return re.sub(r"\b(\d+)(RD|ST|AVE|TH|ND)\b", lambda m: m.group(1) + m.group(2).lower(),
+                      addr, flags=re.I)
+
+    cards = []
+    data = []
+    skipped_no_nature = 0
+    for a in snap.get("alert_history", []):
+        if not (a.get("nature") or "").strip():
+            skipped_no_nature += 1
+            continue
+        a = dict(a)
+        a["address"] = _fix_casing(a["address"])
+        when = datetime.fromtimestamp(a["ts"], ZoneInfo("America/New_York")).strftime("%m-%d %H:%M")
+        outcome = (a.get("outcome") or ("sent" if a["sent"] else "failed")).upper()
+        cls = "ok" if a["sent"] else ("bad" if outcome == "FAILED" else "warn")
+        voice = a.get("voice") or ""
+        player = (f'<audio controls preload="none" src="{esc(voice)}"></audio>' if voice
+                  else '<span class="dim">no recording</span>')
+        cards.append(
+            f'<div class="job" data-s="{esc((when + " " + a["feed"] + " " + (a["nature"] or "") + " " + a["address"]).lower())}">'
+            f'<div class="jrow"><span class="dim mono">{when}</span>'
+            f'<span class="{cls} jres">{esc(outcome)}</span></div>'
+            f'<div class="jnat">{esc(a["nature"] or "-")}</div>'
+            f'<div class="jaddr">{esc(a["address"])}</div>'
+            f'<div class="jmeta"><span class="mono dim">{esc(a["feed"])}</span>{player}</div>'
+            f'</div>')
+        data.append(a)
+    jobs_html = "".join(cards) or '<div class="dim" style="padding:14px 0">no past jobs yet</div>'
+    total = len(data)
+    with_audio = sum(1 for a in data if a.get("voice"))
+
+    js = """
+function filt(){
+ const q=document.getElementById("q").value.trim().toLowerCase();
+ let n=0;
+ document.querySelectorAll(".job").forEach(j=>{
+  const show=!q||j.dataset.s.includes(q);
+  j.style.display=show?"":"none"; if(show)n++;
+ });
+ document.getElementById("cnt").textContent=n+" JOBS";
+}
+"""
+
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>FDNY-SLIM ARCHIVE</title>
+<style>{_PAGE_CSS}
+.toplinks{{float:right;font-size:10px;letter-spacing:2px}}
+.toplinks a{{color:#82888f;margin-left:14px;text-decoration:none;border:1px solid #3a3e45;padding:4px 8px}}
+#q{{background:transparent;border:1px solid #3a3e45;color:#e8e9eb;padding:11px;width:100%;font:13px Arial,Helvetica,sans-serif;margin:6px 0 2px}}
+.job{{border-bottom:1px solid #262a30;padding:9px 0}}
+.jrow{{display:flex;justify-content:space-between;font-size:11px}}
+.jres{{font-weight:700;letter-spacing:1px}}
+.jnat{{font-weight:700;color:#e8e9eb;font-size:13px;margin-top:3px;letter-spacing:1px}}
+.jaddr{{color:#d6d8db;margin-top:1px}}
+.jmeta{{display:flex;justify-content:space-between;align-items:center;margin-top:5px;font-size:11px}}
+audio{{height:26px;width:170px}}
+.note{{color:#6d737c;font-size:11px;margin:4px 0 12px}}
+</style></head><body>
+<div class=hdr><div class=toplinks><a href="/">DASHBOARD</a><a href="settings">SETTINGS</a></div>
+<h1>FDNY-SLIM &nbsp;ARCHIVE</h1>
+<div class=sub>PAST DISPATCH JOBS &middot; CITY OF NEW YORK FIRE CHANNELS</div>
+</div>
+<input id=q type=text placeholder="Search address, nature, or date (e.g. 09-28)" oninput="filt()">
+<div class=note><span id=cnt>{total} JOBS</span> &middot; {with_audio} with recordings &middot; recordings kept off-site, survive restarts</div>
+{jobs_html}
+<script>{js}</script>
+</body></html>"""
+
+
 def _control_html() -> str:
     st = control.load()
     excl = html.escape(", ".join(st["excluded_natures"]))
@@ -315,7 +392,7 @@ button{{background:transparent;border:1px solid #5fb96e;color:#5fb96e;padding:13
 <div class=note>Muted feeds keep recording and transcribing; their alerts are suppressed.</div>
 <button type=submit>SAVE</button>
 </form>
-<div class=note style="margin-top:14px"><a href="/" style="color:#6d737c">&larr; dashboard</a></div>
+<div class=note style="margin-top:14px"><a href="." style="color:#6d737c">&larr; archive</a></div>
 </body></html>"""
 
 
@@ -543,6 +620,11 @@ def make_app(stats: Stats) -> web.Application:
         tok = os.environ.get("CONTROL_TOKEN", "")
         return bool(tok) and hmac.compare_digest(req.match_info["token"], tok)
 
+    async def archive_page(req: web.Request) -> web.Response:
+        if not _ctl_ok(req):
+            raise web.HTTPNotFound()
+        return web.Response(text=_archive_html(stats.snapshot()), content_type="text/html")
+
     async def control_page(req: web.Request) -> web.Response:
         if not _ctl_ok(req):
             raise web.HTTPNotFound()
@@ -561,7 +643,7 @@ def make_app(stats: Stats) -> web.Application:
         stats.event("system", "controls updated: excluded=[" + ", ".join(st["excluded_natures"])
                     + "] watches=[" + ", ".join(st["keyword_watches"])
                     + "] muted=[" + ", ".join(st["muted_feeds"]) + "]")
-        raise web.HTTPFound(req.path.rsplit("/", 1)[0] + "/")
+        raise web.HTTPFound(req.path.rsplit("/", 1)[0] + "/settings")
 
     async def history_push(req: web.Request) -> web.Response:
         # sandbox backfills posted-alert history here (same relay pattern as /hls)
@@ -586,19 +668,30 @@ def make_app(stats: Stats) -> web.Application:
                     address = str(it.get("address") or "")
                     sent = bool(it.get("sent", True))
                     outcome = str(it.get("outcome") or ("sent" if sent else "failed"))
+                    voice = str(it.get("voice") or "")
                 except Exception:  # noqa: BLE001
                     continue
                 key = (round(t), feed, nature, address)
-                if not address or key in existing:
+                if not address:
+                    continue
+                if key in existing:
+                    if voice:
+                        for a in stats.alerts:
+                            if (round(a["t"]), a["feed"], a["nature"], a["address"]) == key \
+                                    and not a.get("voice"):
+                                a["voice"] = voice
+                                added += 1
+                                break
                     continue
                 stats.alerts.appendleft({"t": t, "feed": feed, "nature": nature,
-                                         "address": address, "sent": sent, "outcome": outcome})
+                                         "address": address, "sent": sent,
+                                         "outcome": outcome, "voice": voice})
                 existing.add(key)
                 added += 1
             try:
                 hist = [{"t": a["t"], "feed": a["feed"], "nature": a["nature"],
                          "address": a["address"], "sent": a["sent"],
-                         "outcome": a.get("outcome", "")}
+                         "outcome": a.get("outcome", ""), "voice": a.get("voice", "")}
                         for a in sorted(stats.alerts, key=lambda x: -x["t"])[:500]]
                 stats._hist_file.parent.mkdir(parents=True, exist_ok=True)
                 stats._hist_file.write_text(json.dumps(hist))
@@ -608,7 +701,8 @@ def make_app(stats: Stats) -> web.Application:
         return web.json_response({"ok": True, "added": added})
 
     app.router.add_post("/history", history_push)
-    app.router.add_get("/c/{token}/", control_page)
+    app.router.add_get("/c/{token}/", archive_page)
+    app.router.add_get("/c/{token}/settings", control_page)
     app.router.add_post("/c/{token}/set", control_set)
     app.router.add_get("/health", _health)
     app.router.add_get("/diag", diag)
