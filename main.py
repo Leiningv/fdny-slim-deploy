@@ -1473,6 +1473,15 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             stats.event(profile, f"suppressed (no box obtainable): {hit['nature']} @ {hit['address']}")
             ops_log(f"suppressed (no box obtainable): {hit['nature']} @ {hit['address']}")
             return "suppressed"
+    # North Shore Towers is a documented complex reached from the Grand
+    # Central Parkway service road. Keep the broad highway geocode as the
+    # verification gate, but display the spoken landmark and approach rather
+    # than replacing the location with an arbitrary tower's house number.
+    if hit.get("north_shore_towers") and verified and \
+            re.match(r"^Grand Central Parkway, Queens, NY$", hit["address"], re.I):
+        access = ("Grand Central Parkway Service Road" if
+                  hit.get("service_road_spoken") else "Grand Central Parkway")
+        hit["address"] = f"North Shore Towers, {access}, Queens, NY"
     text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony,
                             box=box_disp, box_loc=box_loc, box_mismatch=box_mismatch,
                             box_closest=box_closest,
