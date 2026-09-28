@@ -505,6 +505,33 @@ def extract_audio_crosses(text: str) -> str | None:
     return None
 
 
+def extract_direct_street_pair(text: str) -> tuple[str, str] | None:
+    """A directly spoken X and Y intersection, both sides typed.
+
+    The first road is the fallback location. The second is a candidate only:
+    map verification decides whether it appears in the outgoing alert.
+    """
+    word = r"[A-Za-z0-9][A-Za-z0-9.'-]*"
+    typ = r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln|Parkway|Pkwy|Court|Ct|Terrace|Ter)"
+    road = rf"{word}(?:\s+{word}){{0,2}}?\s+{typ}"
+    for m in re.finditer(rf"(?=\b({road})\s+(?:and|&)\s+({road})\b)", text, re.I):
+        a, b = m.group(1).strip(), m.group(2).strip()
+        # A location-introducing preposition or comma must lead this pair;
+        # don't reclassify arbitrary chatter as a job location.
+        pre = text[:m.start()]
+        if not re.search(r"(?:\b(?:for|at|on|in|to|corner of|intersection of)\s+|,\s*)$", pre, re.I):
+            continue
+        def clean(n):
+            ws = n.split()
+            while ws and ws[0].lower() in _NAME_STOP:
+                ws.pop(0)
+            return " ".join(ws)
+        a, b = clean(a), clean(b)
+        if a and b and a.lower() != b.lower() and len(a) < 40 and len(b) < 40:
+            return a, b
+    return None
+
+
 def extract_named_cross(text: str) -> str | None:
     """FDNY style: 'Smith Street at Baltic' -> 'Smith St & Baltic St'.
 
@@ -826,6 +853,11 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\b(?:car|vehicle|auto)\s+fire\b")
     if v: return v
+    # Hatzalah uses "full trauma" as a distinct obstetric code. Preserve
+    # the whole spoken phrase rather than collapsing it to "Trauma".
+    if profile == "hatzolah":
+        v = vt(r"\bfull\s+trauma\b")
+        if v: return v
     v = vt(r"\btrauma\b")
     if v: return v
     v = vt(r"\bunconscious\b")
@@ -1058,8 +1090,11 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         _norm(text), re.I))
     # A spoken location intersection outranks the lone typed street that a
     # generic address regex would otherwise extract (Hampton job 9/28).
+    direct_pair = extract_direct_street_pair(t) if profile != "fdny" else None
     spoken_pair = extract_audio_crosses(t) if profile != "fdny" else None
-    if spoken_pair and "&" in spoken_pair and re.search(
+    if direct_pair:
+        addr = _with_area(direct_pair[0], profile, t)
+    elif spoken_pair and "&" in spoken_pair and re.search(
             r"\b(?:for|at|on|of|in)\s+", t, re.I):
         addr = _with_area(spoken_pair, profile, t)
     else:
@@ -1135,6 +1170,14 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         cross = " & ".join(parts) if parts else None
     nature = get_nature(t, profile)
     apt = extract_apartment(t)
+    if not apt and profile == "fdny" and nature and "smoke" in nature.lower():
+        # FDNY dispatch sometimes says "smoke 1 Adam" with no apartment
+        # keyword. Accept a phonetic suffix only right after this job's
+        # spoken nature, never a stray apparatus/unit number.
+        pat = r"\b" + re.escape(nature) + r"\s+(\d{1,3})\s+([a-z]+)\b"
+        m = re.search(pat, t, re.I)
+        if m and m.group(2).lower() in _PHONETIC:
+            apt = "Apartment " + m.group(1) + _PHONETIC[m.group(2).lower()]
     if apt and nature and profile == "fdny":
         nature = f"{nature}, {apt}"
     fl = re.search(r"\bthe\s+((?:first|second|third|fourth|fifth|sixth|"
@@ -1156,4 +1199,5 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                        if re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I) else "",
         "priority": is_priority(t),
         "cross": cross,
+        "direct_cross_candidate": direct_pair[1] if direct_pair else "",
     }
