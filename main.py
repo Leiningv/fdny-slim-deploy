@@ -788,11 +788,10 @@ def _box_address_correction(heard_addr: str, rows: list) -> str:
 
 
 def _heard_box(excerpt: str) -> str | None:
+    # user ruling 9/28 13:36: 'class 3 2584' digits are an ALARM readout, not a
+    # box ('it can come over as a class 3... but the box is wrong') - only a
+    # spoken 'box NNNN' counts as a heard box
     m = re.search(r"\bbox\s+(\d{1,4})\b", excerpt or "", re.I)
-    if m:
-        return m.group(1).zfill(4)
-    # whisper merges 'class 3, box 383' into 'class 3 383' (107 Clinton Ave 9/28)
-    m = re.search(r"\bclass\s+3\s+(\d{3,4})\b", excerpt or "", re.I)
     return m.group(1).zfill(4) if m else None
 
 
@@ -1116,7 +1115,7 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     if crosses:
         lines.append(f"between {crosses}")
     if box:
-        line = f"\N{PAGER} Box {box}"
+        line = f"Box {box}"
         if box_closest:
             line += " (closest)"
         if box_loc:
