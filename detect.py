@@ -99,6 +99,10 @@ def get_hatzolah_area(text: str) -> str:
         if re.search(rf"\b(?:in|near|at|village of|town of)\s+{re.escape(k)}\b", t) or \
                 re.search(rf"\b{re.escape(k)}\s*,?\s+(?:nj|new jersey)\b", t):
             return v
+    # A chapter/unit named Queens may respond across the Nassau line. A
+    # dispatch-local "in Great Neck" names the JOB, not the responding unit.
+    if re.search(r"\bin\s+(?:great|grape)\s+neck\b", t):
+        return "Great Neck"
     for k, v in FIVE_TOWNS_AREAS.items():
         if k in t:
             return v
@@ -1129,10 +1133,23 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         full = re.findall(r"\bbox\s+(\d{4})\b", t, re.I)
         if full:
             t = re.sub(r"\bbox\s+\d{5,7}\b", "", t, flags=re.I)
-    # A spoken location intersection outranks the lone typed street that a
-    # generic address regex would otherwise extract (Hampton job 9/28).
+    # A spoken location intersection outranks a lone street. For a repeated
+    # same-street read in one dispatch, the last complete pair is the final
+    # correction (Beach/Church -> Beach/Middle Neck). Do not mix different
+    # primary roads into this rule.
     direct_pair = extract_direct_street_pair(t) if profile != "fdny" else None
+    if profile == "hatzolah" and direct_pair:
+        first = direct_pair[0]
+        later = list(re.finditer(
+            r"\b" + re.escape(first) + r"\s+(?:and|&)\s+"
+            r"([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,2}\s+"
+            r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl))\b",
+            t, re.I))
+        if later and later[-1].group(1).lower() != direct_pair[1].lower():
+            direct_pair = (first, later[-1].group(1))
     spoken_pair = extract_audio_crosses(t) if profile != "fdny" else None
+    if direct_pair and spoken_pair and spoken_pair.split("&", 1)[0].strip().lower() == direct_pair[0].lower():
+        spoken_pair = f"{direct_pair[0]} & {direct_pair[1]}"
     if terminal_street:
         addr = _with_area(terminal_street, profile, t)
     elif direct_pair:
@@ -1202,6 +1219,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         logging.info("suppressed (dangling intersection address): %s", addr)
         return None
     cross = extract_audio_crosses(t)
+    if direct_pair and cross and cross.split("&", 1)[0].strip().lower() == direct_pair[0].lower():
+        cross = f"{direct_pair[0]} & {direct_pair[1]}"
     if terminal_street:
         cross = "8th Avenue & 9th Avenue"
     if profile == "hatzolah" and addr == "Kell Avenue, Staten Island, NY" and \
@@ -1265,4 +1284,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
-                          }
+}
