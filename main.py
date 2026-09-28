@@ -1183,6 +1183,14 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         elif heard:
             logging.info("[%s] box %s not in lookup DB - not posted", profile, heard)
             stats.event(profile, f"box {heard} not in lookup DB (not posted)")
+    # Six-digit glued box/house runs have two plausible splits. Never post
+    # an uncorroborated guess or a mismatch warning as though the guessed box
+    # were spoken. A box location sharing the verified address/cross is the
+    # independent anchor for the chosen split.
+    if hit.get("box_glue_ambiguous") and (not verified or not box_disp or box_mismatch):
+        stats.event(profile, f"suppressed (ambiguous box/house split): {hit['address']}")
+        ops_log(f"suppressed (ambiguous box/house split): {hit['address']}")
+        return "suppressed"
     # user rules 9/28 13:12 ("the deal"): ADDRESS MANDATORY on every post -
     # unconfirmed with no box anchor does not go out ("no such a thing a
     # address doesn't get posted"); BOX ON EVERY FDNY POST - no heard box ->
