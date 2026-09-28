@@ -162,6 +162,14 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
     Returns 'sent' | 'queued' | 'suppressed'."""
     text_out = format_alert(hit)
+    if re.match(r"^FDNY Box \d+", hit["address"]):
+        logging.info("[%s] suppressed (bare box, no street address): %s", profile, hit["address"])
+        stats.event(profile, f"suppressed (bare box): {hit['address']}")
+        return "suppressed"
+    if not (hit.get("nature") or "").strip():
+        logging.info("[%s] suppressed (no discernible nature): %s", profile, hit["address"])
+        stats.event(profile, f"suppressed (no nature): {hit['address']}")
+        return "suppressed"
     if GEOCODE_VERIFY:
         verified, in_sullivan = await geocode_verify(hit["address"], profile)
         if profile == "sullivan" and verified and not in_sullivan:
@@ -171,13 +179,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if not verified:
             text_out = text_out.replace(hit["address"], hit["address"] + " (not confirmed)", 1)
             stats.event(profile, f"unconfirmed address: {hit['address']}")
-    if clip_name:
-        base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
-        ok = await alert_waha.send_file(text_out, f"{base}/audio/{clip_name}", clip_name)
-        if not ok:
-            ok = await alert_waha.send_text(text_out)
-    else:
-        ok = await alert_waha.send_text(text_out)
+    # Audio paused per user rule 9:28 - voice-note wiring pending; posts are text-only.
+    ok = await alert_waha.send_text(text_out)
     return "sent" if ok else "queued"
 
 

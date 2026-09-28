@@ -467,13 +467,17 @@ def get_nature(text: str) -> str:
         return "Bleeding"
     if re.search(r"\bchest pain\b", t):
         return "Chest Pain"
+    if re.search(r"\b(?:fire|smoke|automatic|smoke detector|co)\s+alarm\b|\balarm activation\b|\bclass\s*3\b", t):
+        return "Fire Alarm Activation"
     if "phone alarm" in t or "still alarm" in t:
         return "Phone Alarm (Fire)"
     if re.search(r"\b(?:fire|smoke|burning)\b", t) and not _negative_fire_context(t):
         return "Fire" if "fire" in t or "burning" in t else "Smoke Condition"
     if re.search(r"\bgas leak\b|\bodou?r of gas\b", t):
         return "Gas Leak"
-    return "EMS"
+    if re.search(r"\b(?:ems|ambulance|sick person|medical emergency|aided)\b", t):
+        return "EMS"
+    return ""
 
 
 # ---------------------------------------------------------------------------
