@@ -102,6 +102,11 @@ def get_hatzolah_area(text: str) -> str:
     for k, v in FIVE_TOWNS_AREAS.items():
         if k in t:
             return v
+    for neighborhood, region in (("kew gardens", "Queens"), ("forest hills", "Queens"),
+                                 ("rego park", "Queens"), ("flushing", "Queens"),
+                                 ("glendale", "Queens"), ("manhattan beach", "Brooklyn")):
+        if re.search(rf"\b{re.escape(neighborhood)}\b", t):
+            return region
     for name in ("Staten Island", "Riverdale", "Manhattan", "Brooklyn", "Queens", "Bronx"):
         pattern = (r"\bmanhattan\b(?!\s+beach)" if name == "Manhattan"
                    else rf"\b{re.escape(name.lower())}\b")
@@ -637,6 +642,17 @@ _LONE_STREET_RE = re.compile(
 def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None:
     """Best-effort dispatch location for one transcript chunk."""
     if profile == "fdny":
+        # A box readout is not a house number. When dispatch gives only a
+        # bare numbered street with spoken crosses, preserve that street.
+        # This pattern is scoped to the box+street readout; a separate spoken
+        # "2926 W 25th" still wins below as an actual house address.
+        bare_box_street = re.search(
+            r"\bbox\s+\d{2,4}\s+((?:east|west|north|south)\s+\d{1,3}"
+            r"(?:st|nd|rd|th)?\s+(?:street|st|avenue|ave))\b", text, re.I)
+        if bare_box_street:
+            follow = text[bare_box_street.end():]
+            if re.match(r"\s*(?:,|\.|between|at|off|from|to|for|and|$)", follow, re.I):
+                return _with_area(_addr_title(bare_box_street.group(1)), profile, text)
         # house number on a named street ('710 Grand Street') is the dispatch
         # address; it beats the 'that's off X and Y' named-cross glue (710
         # Grand St posted as 'That'S Off Manhattan Ave & Graham Ave' 9/28)
@@ -779,6 +795,15 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\b(?:general illness|generally ill|gi distress)\b")
     if v: return v
+    # Spoken medical complaint in the dispatch, not the response unit:
+    # "elderly patient not feeling well" is a nature even without a prior
+    # category keyword. Capture the complaint words themselves; no illness
+    # diagnosis or guessed GI label is added.
+    v = vt(r"\b(?:not feeling well|feeling unwell|feels unwell|feels ill|"
+           r"feeling ill|doesn'?t feel well|does not feel well)\b")
+    if v and re.search(r"\b(?:patient|male|female|elderly|sick person|"
+                       r"year[- ]old|child|adult)\b", t):
+        return v
     v = vt(r"\bchest pain\b")
     if v: return v
     v = vt(r"\bdrown\w*\b")
@@ -1131,4 +1156,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                        if re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I) else "",
         "priority": is_priority(t),
         "cross": cross,
-    }
+}
