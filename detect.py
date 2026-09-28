@@ -5,6 +5,7 @@ Two source profiles: "hatzolah" (Brooklyn) and "sullivan" (Sullivan County).
 """
 from __future__ import annotations
 
+import logging
 import re
 
 # ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ EMERGENCY_PATTERNS = [
     r"\b(?:cross\s+of|corner\s+of|between|intersection\s+of)\b",
     r"\b(?:turnpike|parkway|terrace|boulevard|drive|lane|court|place)\b",
     r"\b(?:hatzalah|hatz|chevra)\s+(?:to|on|at)\b",
-    r"\b(?:allergic|anaphylaxis|epi\s*pen|overdose|unresponsive|syncope|fall|bleeding)\b",
+    r"\b(?:allergic|anaphylaxis|epi\s*pen|overdose|unresponsive|syncope|fall|bleeding|abdominal)\b",
     r"\b(?:full\s+trauma|trauma|traumatic)\b",
     r"\b(?:tree|trees|limb|branch).{0,35}(?:wire|wires|power\s*line|utility\s*line).{0,35}(?:down|burn|burning|fallen|arcing|spark)\b",
     r"\b(?:wire|wires|power\s*line).{0,35}(?:tree|trees|limb|branch).{0,35}(?:down|burn|burning|fallen)\b",
@@ -195,6 +196,14 @@ def _ordinal_street_num(n: int) -> str:
     return f"{n}{'st' if n % 10 == 1 else 'nd' if n % 10 == 2 else 'rd' if n % 10 == 3 else 'th'}"
 
 
+def _addr_title(s: str) -> str:
+    """title() that keeps ordinals lowercase: '53rd street' -> '53rd Street'
+    (str.title gives '53Rd' - shipped in the 6:01 AM 53rd St post 9/28)."""
+    t = s.title()
+    t = re.sub(r"\b(\d+)(St|Nd|Rd|Th)\b", lambda m: m.group(1) + m.group(2).lower(), t)
+    return re.sub(r"\bAnd\b", "and", t)
+
+
 def _format_cross_street_part(num_ord: str, street_type: str) -> str:
     num_ord = num_ord.strip()
     if not num_ord:
@@ -301,12 +310,17 @@ def extract_house_address(text: str) -> str | None:
     """'responding to 5014 15th avenue' -> '5014 15th Ave'."""
     t = _norm(text).lower()
     m = re.search(
-        r"\b(\d{1,5})\s+(\d{1,3}(?:st|nd|rd|th)?)\s+"
+        r"\b(\d{1,5})\s+((?:east|west|north|south)\s+\d{1,3}(?:st|nd|rd|th)|"
+        r"\d{1,3}(?:st|nd|rd|th)?)\s+"
         r"(avenue|ave|street|st|road|rd|drive|dr|boulevard|blvd|place|pl|lane|ln)\b",
         t,
     )
     if m:
-        return f"{m.group(1)} {_format_cross_street_part(m.group(2), m.group(3))}"
+        street = m.group(2)
+        typ = {"st": "street", "ave": "avenue", "rd": "road", "dr": "drive",
+               "blvd": "boulevard", "pl": "place", "ln": "lane"}.get(
+                   m.group(3).lower(), m.group(3))
+        return f"{m.group(1)} {_addr_title(f'{street} {typ}')}"
     return None
 
 
@@ -335,7 +349,7 @@ def extract_audio_crosses(text: str) -> str | None:
     Strict: each side must look like a street name (1-3 words, capitalized or
     numeric in the original transcript, no verb/filler words) - scratchy-audio
     fragments like 'step now' or 'it's going' must never pass."""
-    _T = r"(?:street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter)"
+    _T = r"(?:streets?|st|avenues?|ave|boulevards?|blvd|roads?|rd|drives?|dr|places?|pl|lanes?|ln|parkways?|pkwy|highways?|hwy|courts?|ct|terraces?|ter)"
     _WORD = r"[A-Za-z0-9][A-Za-z0-9.'-]*"
     _NM = rf"{_WORD}(?:\s+{_WORD}){{0,2}}?"      # 1-3 name words
     _TYPED = rf"{_NM}\s+{_T}"                    # "Ralph Avenue"
@@ -400,6 +414,12 @@ def extract_audio_crosses(text: str) -> str | None:
         r = _pair(m.group(1), m.group(2))
         if r:
             return r
+    # numbered pair sharing one suffix, no to/between: "15th and 16th Avenue"
+    m = re.search(rf"\b(\d{{1,3}}(?:st|nd|rd|th))\s+and\s+(\d{{1,3}}(?:st|nd|rd|th)?\s+{_T})\b", t, re.I)
+    if m:
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
     # bare to anchored: "Buffalo to Ralph Avenue", "3 to 4 Avenue"
     m = re.search(rf"\b({_BARE})\s+to\s+({_ANCH})\b", t, re.I)
     if m:
@@ -431,8 +451,8 @@ def extract_named_cross(text: str) -> str | None:
     t2 = m.group(4) or "st"
     if n1 == n2 or not _ok_name(n1) or not _ok_name(n2):
         return None
-    p1 = f"{n1.title()} {_STREET_ABBREV.get(t1.lower(), t1.title())}"
-    p2 = f"{n2.title()} {_STREET_ABBREV.get(t2.lower(), t2.title())}"
+    p1 = f"{_addr_title(n1)} {_STREET_ABBREV.get(t1.lower(), t1.title())}"
+    p2 = f"{_addr_title(n2)} {_STREET_ABBREV.get(t2.lower(), t2.title())}"
     return f"{p1} & {p2}"
 
 
@@ -504,11 +524,11 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         return _with_area(house, profile, text)
     num = _FIRE_NUM_DISPATCH_RE.search(text)
     if num:
-        return _with_area(f"{num.group(1)} {num.group(2).strip().title()}", profile, text)
+        return _with_area(f"{num.group(1)} {_addr_title(num.group(2).strip())}", profile, text)
     lone = _LONE_STREET_RE.search(text)
     if lone:
         street = re.sub(r"^(?:on|the|at|in|to|of|for)\s+", "", lone.group(1).strip(), flags=re.I)
-        street = street.title()
+        street = _addr_title(street)
         if len(street) > 6:
             return _with_area(street, profile, text)
     if profile == "sullivan":
@@ -528,8 +548,11 @@ def _negative_fire_context(t: str) -> bool:
         r"|\bfire\s+(is\s+)?(out|extinguished|knocked?)\b", t))
 
 
-def get_nature(text: str) -> str:
+def get_nature(text: str, profile: str = "") -> str:
     t = text.lower()
+    # 'firefighter(s)' on scene is not a fire nature (53rd St Hatzolah EMS job
+    # posted as 'Fire' 9/28 off a whisper 'Firefight 253' fragment)
+    t = re.sub(r"firefight(?:er|ers|ing)?", " ", t)
     if any(x in t for x in ["all hands", "10-75", "10 75", "working fire", "second alarm"]):
         return "All Hands Fire"
     if re.search(r"\b(?:ped|pedestrian)\s+(?:struck|stricken|hit)\b", t):
@@ -550,8 +573,10 @@ def get_nature(text: str) -> str:
         return "Overdose"
     if re.search(r"\b(?:accident|collision|crash)\b", t):
         return "MVA"
-    if re.search(r"\b(?:stroke|cva|seizure|convuls)\b", t):
-        return "Medical Emergency"
+    if re.search(r"\b(?:stroke|cva)\b", t):
+        return "Stroke"
+    if re.search(r"\b(?:seizure|convuls)\b", t):
+        return "Seizure"
     if re.search(r"\bfall\b|\bfell\b", t):
         return "Fall"
     if re.search(r"\b(?:bleeding|hemorrhage)\b", t):
@@ -566,10 +591,12 @@ def get_nature(text: str) -> str:
         return "Diabetic Emergency"
     if re.search(r"\ballergic\b|\banaphyla|\bbee sting\b", t):
         return "Allergic Reaction"
-    if re.search(r"\babdominal pain\b|\bstomach pain\b", t):
+    if re.search(r"\babdominal\b|\bstomach pain\b", t):
         return "Abdominal Pain"
     if re.search(r"\baltered mental\b|\b(?:pationt|patient)?\s*ams\b|\bdisoriented\b", t):
         return "Altered Mental Status"
+    if re.search(r"\bfire\s+in\s+a\s+private\s+dwelling\b|\bprivate\s+dwelling\s+fire\b", t):
+        return "Private Dwelling Fire"
     if re.search(r"\bstructure fire\b|\bbuilding fire\b|\bhouse fire\b", t):
         return "Structure Fire"
     if re.search(r"\bkitchen fire\b", t):
@@ -582,8 +609,6 @@ def get_nature(text: str) -> str:
         return "Unconscious"
     if re.search(r"(?<![\d-])\bcode\b(?!\s*\d)", t):
         return "Code"
-    if re.search(r"\bstill alarm\b", t):
-        return "Still Alarm"
     if re.search(r"\bwater condition\b|\bwater leak\b|\bburst pipe\b", t):
         return "Water Condition"
     if re.search(r"\bsprinkler", t):
@@ -609,12 +634,26 @@ def get_nature(text: str) -> str:
         return "Odor of Gas"
     if re.search(r"\bgas leak\b", t):
         return "Gas Leak"
+    # 'bus' on the Hatzolah channel = ambulance ('any units for a bus?')
+    if ("hatzal" in profile.lower() or "hatzol" in profile.lower()) \
+            and re.search(r"\bbus\b", t):
+        return "EMS"
+    # bare-word fire fallback is FDNY-only: on the EMS channel a lone whisper
+    # 'fire' is a hallucination until proven ('I can't have fake coming thru'
+    # 9/28) - Hatzalah fire jobs still match the structured patterns above
+    if "hatzal" not in profile.lower() and "hatzol" not in profile.lower() \
+            and re.search(r"\b(?:fire|smoke|burning)\b(?!\s*—)", t) \
+            and not _negative_fire_context(t):
+        return "Fire" if re.search(r"\bfire\b(?!\s*—)", t) or "burning" in t else "Smoke Condition"
+    # transmission-type fallbacks are LAST RESORT - content natures above
+    # always win ('phone alarm... fire in a private dwelling' must post the
+    # fire, not the alarm type; 6:04 AM E 84th St job 9/28)
     if re.search(r"\b(?:fire|smoke|automatic|smoke detector|co)\s+alarm\b|\balarm activation\b|\bclass\s*3\b", t):
         return "Automatic Alarm"
-    if "phone alarm" in t or "still alarm" in t:
+    if re.search(r"\bstill alarm\b", t):
+        return "Still Alarm"
+    if "phone alarm" in t:
         return "Phone Alarm (Fire)"
-    if re.search(r"\b(?:fire|smoke|burning)\b", t) and not _negative_fire_context(t):
-        return "Fire" if "fire" in t or "burning" in t else "Smoke Condition"
     if re.search(r"\b(?:ems|ambulance|sick person|medical emergency|aided)\b", t):
         return "EMS"
     return ""
@@ -641,7 +680,9 @@ _CROSS_STOPWORDS = {
 _ANY_UNITS_RE = re.compile(
     r"\bany\s+units?\s+(?:needed\s+)?(?:in|to|at)\s+(.{2,120})"
     r"|\bany\s+innocent\s+(.{2,120})"
-    r"|\bbanana\s+(.{2,120})", re.I)  # whisper slur of "any units in a" on bad audio
+    r"|\bbanana\s+(.{2,120})"  # whisper slur of "any units in a" on bad audio
+    r"|\bany\s+units?\s+(?:that\s+be\s+|to\s+be\s+)?available\s+for\s+a\s+\w*bus\w*\b"
+    r"()", re.I)  # Hatzolah 'bus' = ambulance request opener (53rd St job 9/28)
 
 
 def is_chatter(text: str) -> bool:
@@ -713,15 +754,15 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     if not addr and head_over:
         place = head_over.group(1).split(".")[0].strip(" ,")
         if len(place) >= 3:
-            addr = _with_area(place.title(), profile, t)
+            addr = _with_area(_addr_title(place), profile, t)
     if not addr and any_units:
         tail = next(g for g in any_units.groups() if g)
         place = re.split(r"\s+for\s+", tail, maxsplit=1)[0].strip(" .,")
         named = re.search(r"\b([a-z]{3,15})\s+and\s+([a-z]{3,15})\b", tail.lower())
         if named and not any(w in _CROSS_STOPWORDS for w in named.groups()):
-            addr = _with_area(f"{named.group(1).title()} & {named.group(2).title()}", profile, t)
+            addr = _with_area(f"{_addr_title(named.group(1))} & {_addr_title(named.group(2))}", profile, t)
         elif len(place) >= 3:
-            addr = _with_area(place.title(), profile, t)
+            addr = _with_area(_addr_title(place), profile, t)
     if not addr and profile == "fdny":
         low = t.lower()
         box = detect_box(low)
@@ -729,9 +770,33 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
             addr = f"FDNY Box {box}, Brooklyn, NY"
     if not addr:
         return None
+    addr = re.sub(r"^(?:[Bb]ack\s+)?(?:[Uu]p|[Bb]y)\s+", "", addr)
+    # address-quality gate: chatter fragments are not places. 'MVA @ The Way'
+    # posted from "had an accident on the way"; 'Ralph And Avenue' from
+    # "corner of Ralph and Avenue D" (9/28 - 'I can't have fake coming thru')
+    street_part = addr.split(",", 1)[0]
+    # chatter fragment with no street type: 'The West Side 901?' is a unit
+    # callout, not a place (Sullivan 6:11 post 9/28). Real streets carry a
+    # type token; type-less names like 'Broadway' survive (no digit/'The').
+    _T_ANY = (r"\b(?:street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
+              r"lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter)\b")
+    if not re.search(_T_ANY, street_part, re.I) \
+            and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
+        logging.info("suppressed (no street type): %s", addr)
+        return None
+    if street_part.rstrip().endswith("?"):
+        logging.info("suppressed (uncertain address): %s", addr)
+        return None
+    if re.match(r"^(?:the\s+)?(?:way|scene|base|bus|back|corner)\s*$", street_part, re.I):
+        logging.info("suppressed (fragment address): %s", addr)
+        return None
+    if re.search(r"\b(?:and|And)\s+(?:Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd|"
+                 r"Drive|Dr|Place|Pl|Lane|Ln)$", street_part):
+        logging.info("suppressed (dangling intersection address): %s", addr)
+        return None
     return {
         "source": source,
-        "nature": get_nature(t),
+        "nature": get_nature(t, profile),
         "address": addr,
         "excerpt": t[:280],
         "priority": is_priority(t),
