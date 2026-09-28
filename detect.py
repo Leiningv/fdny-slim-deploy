@@ -259,6 +259,58 @@ def extract_house_address(text: str) -> str | None:
     return None
 
 
+_NAME_STOP = {
+    "the", "a", "an", "for", "on", "to", "in", "at", "and", "or", "is", "it",
+    "be", "unit", "units", "engine", "ladder", "battalion", "rescue", "squad",
+    "truck", "box", "alarm", "phone", "still", "code", "signal", "from",
+    "with", "of", "by", "go", "no", "we", "you", "your", "rd", "st", "nd",
+    "th", "ave", "man",
+}
+
+
+def _ok_name(n: str) -> bool:
+    if len(n) < 2 or n in _NAME_STOP or n.split()[0] in _NAME_STOP:
+        return False
+    return all(w not in ("rd", "st", "nd", "th", "ave") for w in n.split())
+
+
+def extract_named_cross(text: str) -> str | None:
+    """FDNY style: 'Smith Street at Baltic' -> 'Smith St & Baltic St'.
+
+    The second street type is often omitted on the air, so it is optional;
+    a stopword guard keeps chatter out. Kept fdny-only so the running
+    Hatzolah/Sullivan grammar is untouched.
+    """
+    t = _norm(text).lower()
+    stypes = r"(street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|lane|ln|parkway|pkwy|terrace|ter|court|ct)"
+    name = r"([a-z][a-z'\-]{0,20}(?: [a-z][a-z'\-]{0,20}){0,2}?)"
+    m = re.search(
+        rf"\b{name}\s+{stypes}\s+(?:and|at|&)\s+{name}(?:\s+{stypes})?\b",
+        t, re.I,
+    )
+    if not m:
+        return None
+    n1, t1, n2 = m.group(1).strip(), m.group(2), m.group(3).strip()
+    t2 = m.group(4) or "st"
+    if n1 == n2 or not _ok_name(n1) or not _ok_name(n2):
+        return None
+    p1 = f"{n1.title()} {_STREET_ABBREV.get(t1.lower(), t1.title())}"
+    p2 = f"{n2.title()} {_STREET_ABBREV.get(t2.lower(), t2.title())}"
+    return f"{p1} & {p2}"
+
+
+_FDNY_JOBISH_RE = re.compile(
+    r"\b(?:fire|smoke|gas|odor|leak|mva|mvc|accident|collision|rollover|pin|pinned|"
+    r"entrap|water|wires?|spark|arcing|collapse|alarm|ems|cardiac|unconscious|"
+    r"breathing|overdose|choking|ped\s*struck|man\s*down|electrocut|burn|scald|"
+    r"hazmat|chemical|explos|subway|elevator|stuck)\b", re.I)
+
+_FDNY_SKIP_RE = re.compile(
+    r"\b(?:nothing going on|show us 10-8|you can 10-8|go 10-8|10-8 from|"
+    r"relocate|relocation|radio test|from quarters|10-84|on scene|"
+    r"available|in service)\b", re.I)
+
+
 def detect_box(text: str) -> str | None:
     t = text.lower()
     m = re.search(r"(?:box|alarm)\s+(\d{2,4})", t)
@@ -276,7 +328,7 @@ def get_sullivan_area(text: str) -> str:
 
 
 def _with_area(addr: str, profile: str, text: str) -> str:
-    area = "Brooklyn, NY" if profile == "hatzolah" else f"{get_sullivan_area(text)}, NY"
+    area = "Brooklyn, NY" if profile in ("hatzolah", "fdny") else f"{get_sullivan_area(text)}, NY"
     town = area.split(",")[0].strip().lower()
     if town and town in addr.lower():
         return addr if ", NY" in addr else f"{addr}, NY"
@@ -285,6 +337,10 @@ def _with_area(addr: str, profile: str, text: str) -> str:
 
 def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None:
     """Best-effort dispatch location for one transcript chunk."""
+    if profile == "fdny":
+        named = extract_named_cross(text)
+        if named:
+            return _with_area(named, profile, text)
     hwy = extract_highway_intersection(text, profile)
     if hwy:
         return _with_area(hwy, profile, text)
@@ -341,6 +397,8 @@ def get_nature(text: str) -> str:
         return "Bleeding"
     if re.search(r"\bchest pain\b", t):
         return "Chest Pain"
+    if "phone alarm" in t or "still alarm" in t:
+        return "Phone Alarm (Fire)"
     if re.search(r"\b(?:fire|smoke|burning)\b", t) and not _negative_fire_context(t):
         return "Fire" if "fire" in t or "burning" in t else "Smoke Condition"
     if re.search(r"\bgas leak\b|\bodou?r of gas\b", t):
@@ -377,6 +435,11 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     if is_chatter(t):
         return None
     addr = extract_dispatch_address(t, profile)
+    if not addr and profile == "fdny":
+        low = t.lower()
+        box = detect_box(low)
+        if box and _FDNY_JOBISH_RE.search(low) and not _FDNY_SKIP_RE.search(low):
+            addr = f"FDNY Box {box}, Brooklyn, NY"
     if not addr:
         return None
     return {
