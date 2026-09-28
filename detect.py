@@ -800,6 +800,11 @@ def get_nature(text: str, profile: str = "") -> str:
 
     v = vt(r"\b(?:all hands|10-75|10 75|working fire|second alarm)\b")
     if v: return v
+    # Train/subway strike is a life-safety nature, not generic "ped struck".
+    # Preserve the exact dispatcher wording and keep it ahead of apparatus
+    # and transmission-code fallbacks.
+    v = vt(r"\b(?:person|pedestrian|ped)\s+struck\s+by\s+(?:a\s+)?train\b")
+    if v: return v
     v = vt(r"\b(?:ped|pedestrian)\s+(?:struck|stricken|hit)\b")
     if v: return v
     v = vt(r"\b(?:mva|mvc|motor vehicle accident|rollover|entrapment|car accident|auto accident|vehicle accident)\b")
@@ -1095,6 +1100,14 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     if profile == "hatzalah":  # source label spelling -> grammar spelling
         profile = "hatzolah"
     t = _merge_split_ordinals(_split_box_glue(_norm(text)))
+    if profile == "hatzolah":
+        # User-confirmed Hatzalah street-letter words. Scope to Avenue +
+        # word so a person's name never becomes a street. Do not invent the
+        # rest of the chapter's phonetic alphabet before the user teaches it.
+        t = re.sub(r"\b(?:Avenue|Ave)\s+(?:Nachman|Ackman)\b",
+                   "Avenue N", t, flags=re.I)
+        t = re.sub(r"\b(?:Avenue|Ave)\s+Adam\b",
+                   "Avenue A", t, flags=re.I)
     terminal_street = None
     raw_input = _norm(text)
     if profile == "fdny":
@@ -1284,4 +1297,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
-}
+    }
