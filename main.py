@@ -310,6 +310,25 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                 logging.info("geocode: rejected out-of-state hit: %s -> %s", q, disp)
                 await asyncio.sleep(1.1)
                 continue
+            # coverage gate: these channels serve NYC metro + the Catskills -
+            # in-state is not enough ('3457 Northland Avenue' fuzzy-matched
+            # Buffalo, 470km away, and posted to the Brooklyn group 9/28 14:26)
+            try:
+                _la, _lo = float(res[0].get("lat")), float(res[0].get("lon"))
+                import math as _math
+                def _km(a1, o1, a2, o2):
+                    r = _math.pi / 180
+                    h = (_math.sin((a2 - a1) * r / 2) ** 2
+                         + _math.cos(a1 * r) * _math.cos(a2 * r)
+                         * _math.sin((o2 - o1) * r / 2) ** 2)
+                    return 6371 * 2 * _math.asin(_math.sqrt(h))
+                if min(_km(_la, _lo, 40.7128, -74.0060),
+                       _km(_la, _lo, 41.6556, -74.6893)) > 130:
+                    logging.info("geocode: rejected out-of-coverage hit: %s -> %s", q, disp)
+                    await asyncio.sleep(1.1)
+                    continue
+            except (TypeError, ValueError):
+                pass
             core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", q.split(",")[0]).strip().lower()
             qtoks = {t for t in re.split(r"[\s,.&'-]+", core)
                      if ((len(t) >= 4) or (len(t) == 1 and t.isalpha()))
