@@ -1024,7 +1024,7 @@ _INCIDENT_DEDUP_SEC = 600
 _ADDR_GENERIC = {"street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd",
                  "place", "pl", "drive", "dr", "lane", "ln", "parkway", "pkwy", "court",
                  "ct", "east", "west", "north", "south", "ny", "brooklyn", "new", "york",
-                 "queens", "manhattan", "bronx", "and", "the", "between", "county", "co"}
+                 "queens", "manhattan", "bronx", "and", "the", "between", "county", "co", "sullivan", "nassau", "bergen", "kings", "richmond", "thompson", "monticello", "parksville", "cedarhurst", "fallsburg", "loch", "sheldrake"}
 
 
 def _tok_hit(tok: str, haystack: str) -> bool:
@@ -1623,32 +1623,34 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
             await asyncio.to_thread(_archive_clip, target, clip_name)
             stats.mark_clip(profile, clip_name, text)
             try:
-                hit = detect.analyze(text, profile)
+                job_spans = detect.split_dispatch_jobs(text, profile)
+                hits = [detect.analyze(span, profile) for span in job_spans]
             except Exception as e:  # noqa: BLE001 - one bad chunk must never kill the feed
                 logging.warning("[%s] detect failed: %s", profile, e)
                 stats.event(profile, f"detect error: {e}")
                 prev = wav
                 continue
-            if not hit:
-                continue
-            key = f"{profile}|{hit['nature']}|{hit['address']}"
-            now = time.time()
-            if now - seen.get(key, 0) < DEDUP_SEC:
-                logging.info("[%s] deduped: %s @ %s", profile, hit["nature"], hit["address"])
-                stats.event(profile, f"deduped: {hit['nature']} @ {hit['address']}")
-                continue
-            seen[key] = now
-            _save_seen(seen)
-            outcome = await verify_and_send(profile, hit, stats, clip_name,
-                                            fresh_ts=wav.stat().st_mtime)
-            ok = outcome == "sent"
-            stats.mark_alert(profile, hit["nature"], hit["address"], ok,
-                             voice_url=hit.get("voice_url", ""),
-                             failed=(outcome == "queued"), outcome=outcome)
-            _append_alert_log({"t": now, "feed": profile, "nature": hit["nature"],
-                               "address": hit["address"], "sent": ok,
-                               "excerpt": hit["excerpt"]})
-            logging.info("[%s] ALERT %s @ %s - sent=%s", profile, hit["nature"], hit["address"], ok)
+            for hit in hits:
+                if not hit:
+                    continue
+                key = f"{profile}|{hit['nature']}|{hit['address']}"
+                now = time.time()
+                if now - seen.get(key, 0) < DEDUP_SEC:
+                    logging.info("[%s] deduped: %s @ %s", profile, hit["nature"], hit["address"])
+                    stats.event(profile, f"deduped: {hit['nature']} @ {hit['address']}")
+                    continue
+                seen[key] = now
+                _save_seen(seen)
+                outcome = await verify_and_send(profile, hit, stats, clip_name,
+                                                fresh_ts=wav.stat().st_mtime)
+                ok = outcome == "sent"
+                stats.mark_alert(profile, hit["nature"], hit["address"], ok,
+                                 voice_url=hit.get("voice_url", ""),
+                                 failed=(outcome == "queued"), outcome=outcome)
+                _append_alert_log({"t": now, "feed": profile, "nature": hit["nature"],
+                                   "address": hit["address"], "sent": ok,
+                                   "excerpt": hit["excerpt"]})
+                logging.info("[%s] ALERT %s @ %s - sent=%s", profile, hit["nature"], hit["address"], ok)
         await asyncio.sleep(2)
 
 
