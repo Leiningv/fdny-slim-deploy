@@ -827,6 +827,10 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\b(?:unresponsive|not responsive)\b")
     if v: return v
+    if ("hatzal" in profile.lower() or "hatzol" in profile.lower()) and \
+            re.search(r"\b(?:patient|child|kid|baby|person|infant)\b.{0,30}\bnot acting right\b", t):
+        v = vt(r"\bnot acting right\b")
+        if v: return v
     v = vt(r"\bchok(?:ing|e)\b")
     if v: return v
     v = vt(r"\b(?:overdose|o\.d\.|narcotic)\b")

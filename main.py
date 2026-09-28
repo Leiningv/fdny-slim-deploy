@@ -1148,7 +1148,8 @@ def _save_recent(rows: list) -> None:
 
 async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None,
                             fresh_ts: float | None = None,
-                            audio_ts: float | None = None, spoken_time: str = "") -> str:
+                            audio_ts: float | None = None, spoken_time: str = "",
+                            send_lock: asyncio.Lock | None = None) -> str:
     """User's posting rules (9/28): verified addresses only; Sullivan feed posts
     only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
     Returns 'sent' | 'queued' | 'suppressed'."""
@@ -1372,6 +1373,12 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         # bare street ('53rd Street' + crosses '15th & 16th Avenue') - the
         # spoken intersection itself is the place; verify it on the map
         pt = await _intersection_point(hit["address"], cross)
+        if pt[0] is None and profile.lower().startswith(("hatzalah", "zello-hatzalah")):
+            # One fresh map retry for a directly spoken intersection after a
+            # transient Overpass miss. Never turn an unresolved map result
+            # into a verified address.
+            await asyncio.sleep(0.5)
+            pt = await _intersection_point(hit["address"], cross)
         if pt[0] is not None:
             lat, lon = pt
             verified = True
@@ -1380,6 +1387,39 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             mloc = re.search(r",\s*([A-Za-z ]+),\s*NY", hit["address"])
             locality = mloc.group(1).strip() if mloc else locality
             stats.event(profile, f"verified via intersection (map): {verified_label}")
+    if not verified and profile == "fdny" and box_task is not None and GEOCODE_VERIFY:
+        # A heard box can correct a single ASR street spelling, but only if
+        # the box's own borough and spoken cross independently corroborate it.
+        rows = await box_task
+        heard_street = re.sub(r"^\s*\d+\s+", "", hit["address"].split(",", 1)[0])
+        for loc, borough in rows:
+            if borough != "Brooklyn" or not _rare_tokens(loc) & _rare_tokens(cross):
+                continue
+            sides = re.split(r"\s+at\s+|\s*&\s+|/", loc, flags=re.I)
+            for side in sides:
+                side = side.strip()
+                if not side or not re.search(r"\b(?:st|street|ave|avenue|rd|road)\b", side, re.I):
+                    continue
+                import difflib
+                if difflib.SequenceMatcher(None, _street_core(heard_street),
+                                            _street_core(side)).ratio() < 0.76:
+                    continue
+                type_long = re.sub(r"\bAVE\b", "Avenue", side, flags=re.I)
+                type_long = re.sub(r"\bST\b", "Street", type_long, flags=re.I)
+                type_long = re.sub(r"\bRD\b", "Road", type_long, flags=re.I)
+                house = re.match(r"^\s*(\d+)\s+", hit["address"])
+                if not house:
+                    continue
+                candidate = f"{house.group(1)} {type_long.title()}, Brooklyn, NY"
+                v2, ins2, lbl2, la2, lo2, loc2 = await geocode_verify(candidate, profile)
+                if v2 and loc2.lower() == "brooklyn":
+                    stats.event(profile, f"address corrected via box/map: {hit['address']} -> {candidate}")
+                    ops_log(f"address corrected via box/map: {hit['address']} -> {candidate}")
+                    hit["address"] = candidate
+                    verified, in_sullivan, verified_label, lat, lon, locality = v2, ins2, lbl2, la2, lo2, loc2
+                    break
+            if verified:
+                break
     if not verified and cross and GEOCODE_VERIFY:
         corrected = await _correct_street_via_crosses(hit["address"], cross)
         if corrected and corrected.lower() != hit["address"].lower():
@@ -1520,10 +1560,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     # Verified job survives an unrelated or wrong-borough spoken box.
     # The closest Brooklyn box is selected below after the bad box dies.
     if not verified and not box_disp:
-        logging.info("[%s] suppressed (unconfirmed address, no box anchor): %s",
-                     profile, hit["address"])
-        stats.event(profile, f"suppressed (unconfirmed, no box): {hit['nature']} @ {hit['address']}")
-        ops_log(f"suppressed (unconfirmed, no box): {hit['nature']} @ {hit['address']}")
+        reason = "unconfirmed, no box" if profile == "fdny" else "no verified location"
+        logging.info("[%s] suppressed (%s): %s", profile, reason, hit["address"])
+        stats.event(profile, f"suppressed ({reason}): {hit['nature']} @ {hit['address']}")
+        ops_log(f"suppressed ({reason}): {hit['nature']} @ {hit['address']}")
         return "suppressed"
     box_closest = False
     if profile == "fdny" and not box_disp:
@@ -1580,26 +1620,34 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         except Exception:  # noqa: BLE001
             ogg = None
     ogg_at = time.monotonic()
-    ok = await alert_waha.send_text(text_out)
-    text_at = time.monotonic()
-    logging.info("[%s] stages verification=%.2fs voice_convert=%.2fs text_send=%.2fs",
-                 profile, verified_at-verify_started, ogg_at-verified_at,
-                 text_at-ogg_at)
-    if not ok:
-        ops_log(f"ALERT POST FAILED: {hit['nature']} @ {hit['address']}")
-        return "queued"
-    if clip_name:
-        if ogg:
-            base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
-            vok = await alert_waha.send_voice(f"{base}/audio/{ogg}")
-            if vok:
-                hit["voice_url"] = await _uguu_upload(ARCHIVE_DIR / ogg)
-                if not hit["voice_url"]:
-                    ops_log(f"archive upload failed (post ok): {hit['nature']} @ {hit['address']}")
+    if send_lock is not None:
+        await send_lock.acquire()
+    try:
+        ok = await alert_waha.send_text(text_out)
+        text_at = time.monotonic()
+        logging.info("[%s] stages verification=%.2fs voice_convert=%.2fs text_send=%.2fs",
+                     profile, verified_at-verify_started, ogg_at-verified_at,
+                     text_at-ogg_at)
+        if not ok:
+            ops_log(f"ALERT POST FAILED: {hit['nature']} @ {hit['address']}")
+            return "queued"
+        if clip_name:
+            if ogg:
+                base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
+                vok = await alert_waha.send_voice(f"{base}/audio/{ogg}")
+                if vok:
+                    hit["voice_sent"] = True
+                else:
+                    ops_log(f"voice-note send failed: {hit['nature']} @ {hit['address']}")
             else:
-                ops_log(f"voice-note send failed: {hit['nature']} @ {hit['address']}")
-        else:
-            ops_log(f"voice-note convert failed: {hit['nature']} @ {hit['address']}")
+                ops_log(f"voice-note convert failed: {hit['nature']} @ {hit['address']}")
+    finally:
+        if send_lock is not None:
+            send_lock.release()
+    if hit.get("voice_sent") and ogg:
+        hit["voice_url"] = await _uguu_upload(ARCHIVE_DIR / ogg)
+        if not hit["voice_url"]:
+            ops_log(f"archive upload failed (post ok): {hit['nature']} @ {hit['address']}")
     if profile == "fdny":
         logging.info("[fdny] stages after_text=%.2fs verify_to_end=%.2fs",
                      time.monotonic()-text_at, time.monotonic()-verify_started)
@@ -1628,7 +1676,7 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         r"overdose|stroke|cva|seizure|convuls|fall|fell|bleeding|hemorrhage|"
         r"chest pain|drown|syncope|faint|passed out|diabet|sugar|allergic|"
         r"anaphyla|bee sting|abdominal|stomach|altered|disoriented|"
-        r"unconscious|aided|trauma|general illness|generally ill|gi distress|"
+        r"unconscious|aided|trauma|not acting right|general illness|generally ill|gi distress|"
         r"not feeling well|feeling unwell|feels unwell|feels ill|feeling ill|"
         r"doesn.t feel well|does not feel well|"
         r"sick person|medical emergency|ped(?:estrian)?|mva|mvc|accident|"
@@ -1788,7 +1836,8 @@ def _fdny_fetch_clip(url: str, m4a: Path, wav: Path) -> Path | None:
         return None
 
 
-async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> None:
+async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
+                            send_lock: asyncio.Lock | None = None) -> None:
     stats.mark_segment("fdny")
     cid = str(call.get("id") or call.get("filename") or int(time.time()))
     text = (call.get("transcription") or "").strip()
@@ -1827,7 +1876,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
                 stats.event("fdny", f"detect error: {e}")
     clip_name = None
     if wav is not None and text:
-        clip_name = f"fdny-{int(time.time())}.wav"
+        clip_name = f"fdny-{int(time.time())}-{re.sub(r'[^A-Za-z0-9_-]', '_', cid)[:40]}.wav"
         await asyncio.to_thread(_archive_clip, wav, clip_name)
         stats.mark_clip("fdny", clip_name, text)
     archived_at = time.monotonic()
@@ -1859,7 +1908,8 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
         call_ts = audio_start = None
     verify_start = time.monotonic()
     outcome = await verify_and_send("fdny", hit, stats, clip_name,
-                                    fresh_ts=call_ts, audio_ts=audio_start)
+                                    fresh_ts=call_ts, audio_ts=audio_start,
+                                    send_lock=send_lock)
     logging.info("[fdny] stages id=%s verify_send=%.2fs total=%.2fs outcome=%s",
                  cid, time.monotonic()-verify_start, time.monotonic()-stage_start, outcome)
 
@@ -1874,19 +1924,30 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
 
 
 async def fdny_consumer(stats: Stats, seen: dict) -> None:
-    """Process FDNY Calls pushed by the off-box poller.
-
-    www.broadcastify.com refuses Render egress, so the Calls poll/login runs
-    in the sandbox relay (same as the HLS URL relay) and POSTs new calls to
-    /fdny_calls, which appends them to FDNY_INBOX. The call AUDIO lives on
-    the calls CDN, which Render can reach, so clips are downloaded here.
-    Server-side transcription rides along free with each call; the local
-    whisper is only the fallback. From here on it is the exact same
-    detect -> 30-min dedup -> WAHA -> status-page path as the live feeds.
+    """Process distinct Calls with a small concurrency bound. Only the
+    outbound text+voice pair uses a lock, so no other call may interleave it.
+    The queue is drained continuously while slow map/CDN work runs elsewhere.
     """
     ids: dict = _load_json(FDNY_IDS, {})
     offset = 0
     tmp = SEG_DIR / "fdny_tmp"
+    limit = asyncio.Semaphore(3)
+    send_lock = asyncio.Lock()
+    active: set = set()
+
+    async def worker(call: dict, cid: str, queued_at: float) -> None:
+        async with limit:
+            logging.info("[fdny] queue id=%s wait=%.2fs source_stop_age=%.2fs",
+                         cid, time.monotonic()-queued_at,
+                         time.time()-float(call.get("ts") or time.time()))
+            try:
+                # The shared dedup state stays in the event loop. Each alert
+                # gets its own temp files by cid, with a send lock only at the
+                # final WhatsApp text/voice pair inside verify_and_send.
+                await _fdny_handle_call(call, stats, seen, tmp, send_lock=send_lock)
+            except Exception as e:  # noqa: BLE001
+                logging.warning("[fdny] worker id=%s failed: %s", cid, e)
+
     while True:
         try:
             if FDNY_INBOX.exists():
@@ -1899,9 +1960,6 @@ async def fdny_consumer(stats: Stats, seen: dict) -> None:
                         chunk = fh.read()
                         offset = fh.tell()
                     for line in chunk.splitlines():
-                        line = line.strip()
-                        if not line:
-                            continue
                         try:
                             call = json.loads(line)
                         except Exception:  # noqa: BLE001
@@ -1916,7 +1974,9 @@ async def fdny_consumer(stats: Stats, seen: dict) -> None:
                             FDNY_IDS.write_text(json.dumps(ids))
                         except Exception:  # noqa: BLE001
                             pass
-                        await _fdny_handle_call(call, stats, seen, tmp)
+                        task = asyncio.create_task(worker(call, cid, time.monotonic()))
+                        active.add(task)
+                        task.add_done_callback(active.discard)
         except Exception as e:  # noqa: BLE001
             logging.warning("[fdny] consumer error: %s", e)
         await asyncio.sleep(2)
