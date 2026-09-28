@@ -524,6 +524,18 @@ def _rare_tokens(addr: str) -> set:
             if len(t) >= 4 and t not in _ADDR_GENERIC and not t.isdigit()}
 
 
+def _street_core(addr: str) -> str:
+    """Normalized primary street: '535 4th Ave, Brooklyn' -> '4th ave';
+    '4TH AVE at 13 ST' -> '4th ave'."""
+    s = re.split(r"\s+at\s+|,|&", addr.lower())[0]
+    s = re.sub(r"^\s*\d+(?:[A-Za-z])?\s+", "", s).strip()
+    s = re.sub(r"\b(avenue|ave)\b", "ave", s)
+    s = re.sub(r"\b(street|st)\b", "st", s)
+    s = re.sub(r"\b(road|rd)\b", "rd", s)
+    s = re.sub(r"\b(boulevard|blvd)\b", "blvd", s)
+    return re.sub(r"\s+", " ", s)
+
+
 def _load_recent() -> list:
     try:
         data = json.loads(RECENT_FILE.read_text())
@@ -668,8 +680,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         heard = _heard_box(hit.get("excerpt") or "")
         if rows and heard:
             toks = _rare_tokens(f"{hit['address']} {cross} {verified_label}")
+            inc_street = _street_core(verified_label or hit["address"])
             for loc, borough in rows:
-                if _rare_tokens(loc) & toks:
+                if _rare_tokens(loc) & toks or \
+                        (inc_street and inc_street == _street_core(loc)):
                     box_disp = heard
                     break
             if not box_disp:
