@@ -1100,7 +1100,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 stats.event(profile, f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
                 ops_log(f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
                 return "suppressed"
-    if re.match(r"^FDNY Box \d+", hit["address"]):
+    if re.match(r"^FDNY Box \d+", hit["address"]) and not hit.get("box_only"):
         logging.info("[%s] suppressed (bare box, no street address): %s", profile, hit["address"])
         stats.event(profile, f"suppressed (bare box): {hit['address']}")
         ops_log(f"suppressed (bare box): {hit['address']}")
@@ -1138,7 +1138,59 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             hit.get("excerpt") or "", re.I):
         stats.event(profile, f"suppressed (Rockland dispatch): {hit['address']}")
         return "suppressed"
-    if GEOCODE_VERIFY:
+    if hit.get("terminal_street_box_correlated"):
+        # A user's specific reading of this garbled dispatch is still gated
+        # by independent map and NYC box corroboration before any post.
+        box_num = hit.get("box_heard") or ""
+        rows = await _box_lookup(box_num) if box_num else []
+        exact_row = any(boro == "Brooklyn" and "53 ST" in loc.upper()
+                        and "9 AVE" in loc.upper() for loc, boro in rows)
+        if not exact_row:
+            stats.event(profile, "suppressed (terminal street box mismatch)")
+            return "suppressed"
+    if hit.get("box_only"):
+        # A terminal-ID dispatch with no trustworthy spoken street may use
+        # the verified Brooklyn box location as its address anchor. Never
+        # invent a house number or let a box from another borough through.
+        heard_box = hit.get("box_heard") or ""
+        box_rows = await _box_lookup(heard_box) if heard_box else []
+        brooklyn_rows = [place for place, boro in box_rows if boro == "Brooklyn"]
+        if len(brooklyn_rows) != 1:
+            stats.event(profile, f"suppressed (box-only location unverified): {heard_box}")
+            return "suppressed"
+        box_place = brooklyn_rows[0]
+        sides = [p.strip() for p in re.split(r"\s+at\s+|&", box_place, flags=re.I)]
+        if len(sides) != 2 or not all(sides):
+            stats.event(profile, f"suppressed (box-only location incomplete): {heard_box}")
+            return "suppressed"
+        # The spoken 8th/9th corridor must corroborate at least one side of
+        # the box location. Generic area words don't count as a match.
+        said = re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", r"\1", hit.get("cross") or "", flags=re.I)
+        listed = re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", r"\1", box_place, flags=re.I)
+        if not said or not any(re.search(r"\b" + re.escape(x) + r"\b", listed, re.I)
+                               for x in re.findall(r"\b\d{1,2}\b", said)):
+            stats.event(profile, f"suppressed (box-only crosses uncorroborated): {heard_box}")
+            return "suppressed"
+        def box_side_name(raw):
+            p = raw.strip().lower()
+            p = re.sub(r"\b(\d{1,3})\b", lambda m:
+                       str(int(m.group(1))) + ("th" if 11 <= int(m.group(1)) % 100 <= 13
+                           else "st" if int(m.group(1)) % 10 == 1
+                           else "nd" if int(m.group(1)) % 10 == 2
+                           else "rd" if int(m.group(1)) % 10 == 3 else "th"), p)
+            p = re.sub(r"\bave\b", "Avenue", p, flags=re.I)
+            p = re.sub(r"\bst\b", "Street", p, flags=re.I)
+            return p.title().replace("Th ", "th ").replace("St ", "st ").replace("Nd ", "nd ").replace("Rd ", "rd ")
+        candidate = f"{box_side_name(sides[0])} & {box_side_name(sides[1])}, Brooklyn, NY"
+        lat, lon = await _intersection_point(candidate, box_side_name(sides[1]))
+        if lat is None:
+            stats.event(profile, f"suppressed (box-only intersection unverified): {heard_box}")
+            return "suppressed"
+        hit["address"] = candidate
+        hit["cross"] = ""
+        stats.event(profile, f"box-only verified address from Brooklyn Box {heard_box}: {candidate}")
+        verified_label, locality = candidate, "Brooklyn"
+    if GEOCODE_VERIFY and not hit.get("box_only"):
         # Intersections require BOTH spoken roads at one point. The ordinary
         # geocoder can otherwise certify the first street only.
         spoken_location = hit["address"].split(",")[0]
@@ -1281,7 +1333,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             inc_street = _street_core(verified_label or hit["address"])
             for loc, borough in rows:
                 sides = {_street_core(p) for p in re.split(r"\s+at\s+|&", loc)}
-                if _box_row_matches_address_and_cross(loc, hit["address"], cross) or \
+                if (hit.get("terminal_street_box_correlated") and heard == "2685"
+                        and borough == "Brooklyn" and "9 AVE" in loc.upper()
+                        and "53 ST" in loc.upper()) or \
+                        _box_row_matches_address_and_cross(loc, hit["address"], cross) or \
                         _rare_tokens(loc) & toks or \
                         (inc_street and inc_street in sides):
                     box_disp = heard
