@@ -173,7 +173,8 @@ def _html(snap: dict) -> str:
             f"<td>{f['segments_seen']}</td><td>{f['transcripts']}</td>"
             f"<td>{f['ffmpeg_restarts']}</td>"
             f"<td>{_fmt_age(f['last_segment_age_sec'])}</td>"
-            f"<td>{esc(f['last_transcript'][:140])}</td></tr>")
+            f"<td>{esc(f['last_transcript'][:140])}</td>"
+            f"<td>{esc(f['last_alert'][:80])}</td></tr>")
 
     if snap["alert_log"]:
         alert_rows = "".join(
@@ -193,6 +194,10 @@ def _html(snap: dict) -> str:
     else:
         clip_items = '<tr><td colspan="4" class="dim">no speech captured yet this run - clips appear here the first time a feed talks</td></tr>'
 
+    import transcribe as _tr
+    engine = "AssemblyAI universal-3-pro + keyterm boost (local whisper fallback)" if _tr.AAI_KEY else "local whisper (faster-whisper)"
+    queued = snap["alerts_failed"] if snap["waha_session"] != "WORKING" else 0
+
     evs = "".join(
         f"<li>[{esc(e['feed'])}] {esc(e['msg'])} <span class=dim>({_fmt_age(e['age_sec'])})</span></li>"
         for e in snap["recent_events"])
@@ -200,7 +205,7 @@ def _html(snap: dict) -> str:
     return f"""<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta http-equiv=refresh content=60>
-<title>FD - Brooklyn/Sullivan monitor status</title>
+<title>fdny-slim dispatch monitor</title>
 <style>
 body{{font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;background:#fff;color:#111;padding:16px;max-width:1000px;margin:auto}}
 h1{{font-size:15px;margin:0 0 2px}} h2{{font-size:13px;margin:18px 0 6px;text-transform:uppercase;letter-spacing:.5px}}
@@ -211,17 +216,18 @@ audio{{height:28px;width:220px}}
 ul{{margin:0;padding-left:18px}} li{{margin:2px 0}}
 .bar{{border:1px solid #999;background:#eee;padding:6px 10px;margin:8px 0}}
 </style>
-<h1>FD - BROOKLYN/SULLIVAN dispatch monitor</h1>
+<h1>fdny-slim &mdash; dispatch monitor</h1>
 <div class="bar">
 status: <span class="ok">LIVE</span> &middot; uptime {int(snap['uptime_sec'] // 60)}m
 &middot; commit {esc(snap['git_commit'] or '?')}
 &middot; WAHA session: <b>{esc(snap['waha_session'])}</b>
 &middot; alerts sent {snap['alerts_sent']} (failed {snap['alerts_failed']})
-&middot; feeds: Hatzolah Brooklyn EMS (Broadcastify 7392), Sullivan County Fire/EMS (32727), FDNY Brooklyn Dispatch (Calls)
+<br>feeds: Zello TSL-ChevraHatzalah (24/7) &middot; Zello Sullivan County (standby) &middot; FDNY Brooklyn dispatch (Calls)
+<br>transcription: <b>{engine}</b> &middot; alerts queued (WAHA down): {queued}
 &middot; auto-refresh 60s
 </div>
 <h2>feeds</h2>
-<table><tr><th>feed</th><th>capture</th><th>segments</th><th>transcripts</th><th>restarts</th><th>last audio</th><th>last thing heard</th></tr>
+<table><tr><th>feed</th><th>capture</th><th>segments</th><th>transcripts</th><th>restarts</th><th>last audio</th><th>last thing heard</th><th>last alert</th></tr>
 {''.join(feed_rows)}</table>
 <h2>job / alert log</h2>
 <table><tr><th>when</th><th>feed</th><th>nature</th><th>address</th><th>whatsapp</th></tr>
