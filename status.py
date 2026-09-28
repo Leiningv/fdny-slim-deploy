@@ -217,7 +217,7 @@ status: <span class="ok">LIVE</span> &middot; uptime {int(snap['uptime_sec'] // 
 &middot; commit {esc(snap['git_commit'] or '?')}
 &middot; WAHA session: <b>{esc(snap['waha_session'])}</b>
 &middot; alerts sent {snap['alerts_sent']} (failed {snap['alerts_failed']})
-&middot; feeds: Hatzolah Brooklyn EMS (Broadcastify 7392), Sullivan County Fire/EMS (32727)
+&middot; feeds: Hatzolah Brooklyn EMS (Broadcastify 7392), Sullivan County Fire/EMS (32727), FDNY Brooklyn Dispatch (Calls)
 &middot; auto-refresh 60s
 </div>
 <h2>feeds</h2>
@@ -299,9 +299,36 @@ def make_app(stats: Stats) -> web.Application:
         p.write_text(json.dumps(cur))
         return web.json_response({"ok": True, "feeds": saved})
 
+    async def fdny_calls(req: web.Request) -> web.Response:
+        # The sandbox poller pushes FDNY Calls here. www.broadcastify.com
+        # refuses Render egress, so the poll/login runs off-box (same relay
+        # pattern as /hls); call audio stays on the calls CDN, which Render
+        # CAN reach, so clips are downloaded by the consumer in main.py.
+        secret = os.environ.get("HLS_PUSH_SECRET", "")
+        try:
+            d = await req.json()
+        except Exception:
+            return web.Response(status=400, text="bad json")
+        if not secret or d.get("secret") != secret:
+            return web.Response(status=403, text="bad secret")
+        calls = d.get("calls")
+        if not isinstance(calls, list):
+            return web.Response(status=400, text="calls must be a list")
+        p = Path(os.environ.get("SEG_DIR", "./segments")) / "fdny_inbox.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        kept = 0
+        with p.open("a") as fh:
+            for c in calls[:50]:
+                if isinstance(c, dict) and (c.get("id") or c.get("filename")):
+                    fh.write(json.dumps(c)[:4000] + "\n")
+                    kept += 1
+        stats.event("fdny", f"{kept} call(s) pushed via relay")
+        return web.json_response({"ok": True, "queued": kept})
+
     app.router.add_get("/health", _health)
     app.router.add_get("/diag", diag)
     app.router.add_post("/hls", hls_push)
+    app.router.add_post("/fdny_calls", fdny_calls)
     app.router.add_get("/status", status_json)
     app.router.add_get("/audio/{name}", audio)
     app.router.add_get("/", home)
