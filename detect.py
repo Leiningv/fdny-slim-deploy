@@ -327,36 +327,76 @@ _VERB_BEFORE_TO = re.compile(r"\b(?:respond|responding|go|going|come|report|back
 
 def extract_audio_crosses(text: str) -> str | None:
     """Cross streets spoken in the dispatch: 'Buffalo to Ralph Avenue',
-    'Lorimer Street to Broadway', 'between X and Y'. Returns 'X & Y' or None."""
+    'Lorimer Street to Broadway', 'between X and Y'. Returns 'X & Y' or None.
+    Strict: each side must look like a street name (1-3 words, capitalized or
+    numeric in the original transcript, no verb/filler words) - scratchy-audio
+    fragments like 'step now' or 'it's going' must never pass."""
     _T = r"(?:street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter)"
-    _NM = r"[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+)*?"
+    _WORD = r"[A-Za-z0-9][A-Za-z0-9.'-]*"
+    _NM = rf"{_WORD}(?:\s+{_WORD}){{0,2}}?"      # 1-3 name words
     _TYPED = rf"{_NM}\s+{_T}"                    # "Ralph Avenue"
     _TN = rf"{_T}\s+[A-Za-z0-9]{{1,2}}"          # "Avenue H", "Avenue 2"
     _ANCH = rf"(?:{_TYPED}|{_TN})"
-    _BARE = r"[A-Za-z0-9][A-Za-z0-9.'-]{0,}(?:\s+[A-Za-z][A-Za-z.'-]{2,})?"
-    _STOP2 = {"the", "a", "an", "you", "me", "him", "her", "scene", "hospital", "brooklyn", "units", "it"}
-    _STOP1 = _STOP2 | {"respond", "responding", "go", "going", "come", "report", "back",
-                       "return", "head", "heading", "enroute", "out", "take", "copy", "make"}
+    _BARE = rf"{_WORD}(?:\s+{_WORD})?"
+    _STOP1 = {"the", "a", "an", "you", "me", "him", "her", "it", "its", "now",
+              "scene", "hospital", "units", "unit", "any", "respond", "responding",
+              "go", "going", "come", "report", "back", "return", "head", "heading",
+              "enroute", "out", "take", "copy", "make", "step", "be", "to", "and",
+              "for", "on", "in", "of", "can", "are", "there"}
     t = text
+
+    def _ok(name: str) -> bool:
+        ws = name.split()
+        if not (1 <= len(ws) <= 3) or len(name) > 32:
+            return False
+        if any(w.lower() in _STOP1 for w in ws):
+            return False
+        return all(w[0].isupper() or w[0].isdigit() for w in ws)
+
+    def _pair(a: str, b: str) -> str | None:
+        a, b = a.strip(), b.strip()
+        if _ok(a) and _ok(b) and a.lower() != b.lower():
+            return f"{a} & {b}"
+        return None
+
     m = re.search(rf"\bbetween\s+({_ANCH})\s+and\s+({_ANCH})\b", t, re.I)
     if m:
-        return f"{m.group(1).strip()} & {m.group(2).strip()}"
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
+    # between with one bare side: "between North Cannon and Victory Boulevard"
+    m = re.search(rf"\bbetween\s+({_BARE})\s+and\s+({_ANCH})\b", t, re.I)
+    if m:
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
+    m = re.search(rf"\bbetween\s+({_ANCH})\s+and\s+({_BARE})\b", t, re.I)
+    if m:
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
     # anchored to anchored: "Glenwood Road to Avenue H"
     m = re.search(rf"({_ANCH})\s+to\s+({_ANCH})\b", t, re.I)
     if m:
-        return f"{m.group(1).strip()} & {m.group(2).strip()}"
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
     # anchored to bare: "Lorimer Street to Broadway"
     m = re.search(rf"({_ANCH})\s+to\s+({_BARE})\b", t, re.I)
-    if m and m.group(2).lower() not in _STOP2:
+    if m:
         pre = t[:m.start()].rstrip()[-12:]
         if not _VERB_BEFORE_TO.search(pre + " "):
-            return f"{m.group(1).strip()} & {m.group(2).strip()}"
+            r = _pair(m.group(1), m.group(2))
+            if r:
+                return r
     # bare to anchored: "Buffalo to Ralph Avenue", "3 to 4 Avenue"
     m = re.search(rf"\b({_BARE})\s+to\s+({_ANCH})\b", t, re.I)
-    if m and m.group(1).lower() not in _STOP1:
+    if m:
         pre = t[:m.start()].rstrip()[-12:]
         if not _VERB_BEFORE_TO.search(pre + " "):
-            return f"{m.group(1).strip()} & {m.group(2).strip()}"
+            r = _pair(m.group(1), m.group(2))
+            if r:
+                return r
     return None
 
 
