@@ -1065,6 +1065,25 @@ def extract_apartment(text: str) -> str:
     return ""
 
 
+def split_dispatch_jobs(text: str, profile: str) -> list[str]:
+    """Split an overlapped Sullivan clip at a NEW dispatch opener, never at a
+    repeat/second page within the same job. Nature and address must be read
+    from the same span. A leading partial job is kept independently, rather
+    than glued to a later complete dispatch.
+    """
+    if profile.removeprefix("zello-") != "sullivan":
+        return [text]
+    openers = list(re.finditer(
+        r"\b(?:sullivan(?:\s+county)?\s+dispatch|\d{1,2}\s+dispatch)\s+to\s+"
+        r"(?:empress|[a-z][a-z0-9-]{2,})\b", text, re.I))
+    if len(openers) < 2 and (not openers or openers[0].start() < 20):
+        return [text]
+    bounds = [0] + [m.start() for m in openers if m.start() >= 20]
+    bounds.append(len(text))
+    return [text[a:b].strip(" .,\n") for a, b in zip(bounds, bounds[1:])
+            if text[a:b].strip(" .,\n")]
+
+
 def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     """Return an alert dict, or None when this chunk should not alert."""
     source = profile
@@ -1246,4 +1265,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
-    }
+                          }
