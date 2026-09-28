@@ -239,6 +239,12 @@ def extract_highway_intersection(text: str, profile: str = "hatzolah") -> str | 
     kw, hwy = _find_highway(t, profile)
     if not hwy:
         return None
+    # 'prospect avenue' is the street, not the Prospect Expressway: an alias
+    # keyword directly followed by a non-highway street type is that street
+    if re.search(
+            rf"\b{re.escape(kw)}\s+(?:avenue|ave|street|st|road|rd|boulevard|"
+            rf"blvd|drive|dr|place|pl|lane|ln|court|ct|terrace|ter)\b", t):
+        return None
     # [highway] at exit N
     m = re.search(rf"{re.escape(kw)}[^.]*?(?:at\s+)?exit\s+(\d{{1,3}}[a-z]?)\b", t)
     if m:
@@ -340,7 +346,7 @@ _NAME_STOP = {
     "truck", "box", "alarm", "phone", "still", "code", "signal", "from",
     "with", "of", "by", "go", "no", "we", "you", "your", "rd", "st", "nd",
     "th", "ave", "man", "that", "thats", "that's", "off", "corner", "near",
-    "next", "up", "out", "just", "right", "fire", "smoke",
+    "next", "up", "out", "just", "right", "fire", "smoke", "it's", "its",
 }
 
 
@@ -453,26 +459,40 @@ def extract_named_cross(text: str) -> str | None:
     t = _norm(text).lower()
     stypes = r"(street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|lane|ln|parkway|pkwy|terrace|ter|court|ct)"
     name = r"([a-z][a-z'\-]{0,20}(?: [a-z][a-z'\-]{0,20}){0,2}?)"
-    m = re.search(
-        rf"\b{name}\s+{stypes}\s+(?:and|at|&)\s+{name}(?:\s+{stypes})?\b",
-        t, re.I,
-    )
-    if not m:
-        return None
-    n1, t1, n2 = m.group(1).strip(), m.group(2), m.group(3).strip()
-    t2 = m.group(4) or "st"
-    # leading dispatcher glue is not part of the street name ('that's off
-    # Manhattan Avenue and Graham Avenue' posted 'That'S Off Manhattan Ave'
-    # 9/28) - strip leading filler words before validating
-    w1 = n1.split()
-    while w1 and w1[0] in _NAME_STOP:
-        w1.pop(0)
-    n1 = " ".join(w1)
-    if n1 == n2 or not _ok_name(n1) or not _ok_name(n2):
-        return None
-    p1 = f"{_addr_title(n1)} {_STREET_ABBREV.get(t1.lower(), t1.title())}"
-    p2 = f"{_addr_title(n2)} {_STREET_ABBREV.get(t2.lower(), t2.title())}"
-    return f"{p1} & {p2}"
+    # lookahead wrapper: candidates overlap ('auto accident IT'S BELL parkway
+    # and...' must still find the 'it's bell parkway' candidate after the
+    # leftmost one fails validation)
+    for m in re.finditer(
+            rf"(?=\b({name})\s+({stypes})\s+(?:and|at|&)\s+({name})(?:\s+({stypes}))?\b)",
+            t, re.I):
+        # groups 1/3/5/7 are the outer captures (name/stypes carry inner ones)
+        n1, t1, n2 = m.group(1).strip(), m.group(3), m.group(5).strip()
+        t2 = m.group(7) or "st"
+        # leading dispatcher glue is not part of the street name ('that's off
+        # Manhattan Avenue and Graham Avenue' posted 'That'S Off Manhattan Ave'
+        # 9/28) - strip leading filler words before validating
+        w1 = n1.split()
+        while w1 and w1[0] in _NAME_STOP:
+            w1.pop(0)
+        n1 = " ".join(w1)
+        if n1 == n2 or not _ok_name(n1) or not _ok_name(n2):
+            continue
+        p1 = f"{_addr_title(n1)} {_STREET_ABBREV.get(t1.lower(), t1.title())}"
+        p2 = f"{_addr_title(n2)} {_STREET_ABBREV.get(t2.lower(), t2.title())}"
+
+        def _alias_fix(part: str) -> str:
+            # 'it's bell parkway and pennsylvania avenue' posted 'It's Bell
+            # Pkwy' (9/28 15:55) - the alias table knows the whisper variants
+            ws = part.split()
+            if len(ws) >= 2 and ws[-1].lower() in ("pkwy", "parkway", "hwy",
+                                                   "highway", "expwy", "expressway"):
+                disp = (NYC_HIGHWAYS.get(" ".join(ws[:-1]).lower())
+                        or NYC_BRIDGES.get(" ".join(ws[:-1]).lower()))
+                if disp:
+                    return disp
+            return part
+        return f"{_alias_fix(p1)} & {_alias_fix(p2)}"
+    return None
 
 
 _FDNY_JOBISH_RE = re.compile(
@@ -673,7 +693,7 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\b(?:co alarm|carbon monoxide)\b")
     if v: return v
-    v = vt(r"\b(?:rubbish|rubbish fire|garbage fire|trash fire)\b")
+    v = vt(r"\b(?:rubbish fire|garbage fire|trash fire|rubbish)\b")
     if v: return v
     v = vt(r"\b(?:outside fire|brush fire)\b")
     if v: return v
