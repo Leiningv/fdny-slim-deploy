@@ -20,6 +20,8 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from collections import deque
 from pathlib import Path
 
@@ -34,13 +36,21 @@ class Stats:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.feeds: dict[str, dict] = {}
-        self.events: deque = deque(maxlen=60)
+        self.events: deque = deque(maxlen=300)
         self.alerts: deque = deque(maxlen=500)
         self.clips: deque = deque(maxlen=ARCHIVE_KEEP * 4)
         self.alerts_sent = 0
         self.alerts_failed = 0
         self.waha_status = "unknown"
         self.git_commit = os.environ.get("RENDER_GIT_COMMIT", "")[:7] or os.environ.get("GIT_COMMIT", "")[:7]
+        self._hist_file = Path(os.environ.get("SEG_DIR", "./segments")) / "alert_history.json"
+        try:
+            for a in json.loads(self._hist_file.read_text())[-500:]:
+                self.alerts.append({"t": a["t"], "feed": a["feed"], "nature": a["nature"],
+                                    "address": a["address"], "sent": a["sent"],
+                                    "outcome": a.get("outcome", "")})
+        except Exception:
+            pass
 
     def feed(self, name: str) -> dict:
         return self.feeds.setdefault(name, {
@@ -104,6 +114,15 @@ class Stats:
                                     "outcome": out})
             self.events.appendleft({"t": time.time(), "feed": profile,
                                     "msg": f"ALERT {out}: {nature} @ {address}"})
+            try:
+                hist = [{"t": a["t"], "feed": a["feed"], "nature": a["nature"],
+                         "address": a["address"], "sent": a["sent"],
+                         "outcome": a.get("outcome", "")}
+                        for a in list(self.alerts)[:500]]
+                self._hist_file.parent.mkdir(parents=True, exist_ok=True)
+                self._hist_file.write_text(json.dumps(hist))
+            except Exception:
+                pass
 
     @staticmethod
     def _age(ts):
@@ -142,6 +161,12 @@ class Stats:
                      "outcome": a.get("outcome") or ("sent" if a["sent"] else "failed")}
                     for a in list(self.alerts)[:30]
                 ],
+                "alert_history": [
+                    {"ts": a["t"], "feed": a["feed"], "nature": a["nature"],
+                     "address": a["address"], "sent": a["sent"],
+                     "outcome": a.get("outcome") or ("sent" if a["sent"] else "failed")}
+                    for a in list(self.alerts)[:500]
+                ],
                 "clips": [
                     {"age_sec": self._age(c["t"]), "feed": c["feed"],
                      "url": "/audio/" + c["file"], "transcript": c["transcript"]}
@@ -149,7 +174,7 @@ class Stats:
                 ],
                 "recent_events": [
                     {"age_sec": self._age(e["t"]), "feed": e["feed"], "msg": e["msg"]}
-                    for e in list(self.events)[:20]
+                    for e in list(self.events)[:25]
                 ],
             }
 
@@ -306,6 +331,19 @@ def _html(snap: dict) -> str:
         clip_rows = ('<tr><td colspan="4" class="dim">no speech captured yet this run'
                      ' - clips appear here the first time a feed talks</td></tr>')
 
+    hist_rows = []
+    for a in snap.get("alert_history", []):
+        h_outcome = (a.get("outcome") or ("sent" if a["sent"] else "failed")).upper()
+        h_cls = "ok" if a["sent"] else ("bad" if h_outcome == "FAILED" else "warn")
+        h_when = datetime.fromtimestamp(a["ts"], ZoneInfo("America/New_York")).strftime("%m-%d %H:%M")
+        hist_rows.append(
+            f'<tr><td class="dim mono" data-label="WHEN (ET)">{h_when}</td>'
+            f'<td class="mono" data-label="FEED">{esc(a["feed"])}</td>'
+            f'<td data-label="NATURE">{esc(a["nature"] or "-")}</td>'
+            f'<td data-label="ADDRESS">{esc(a["address"])}</td>'
+            f'<td class="{h_cls}" data-label="RESULT">{esc(h_outcome)}</td></tr>')
+    hist_html = "".join(hist_rows) or '<tr><td colspan="5" class="dim">no alerts yet</td></tr>'
+
     ev_rows = "".join(
         f'<tr><td class="dim" data-label="WHEN">{_fmt_age(e["age_sec"])}</td>'
         f'<td class="mono" data-label="FEED">{esc(e["feed"])}</td>'
@@ -354,6 +392,9 @@ def _html(snap: dict) -> str:
 <div class=sec>RECENT FEED AUDIO</div><table class=resp>
 <thead><tr><th>WHEN</th><th>FEED</th><th>PLAY</th><th>TRANSCRIPT</th></tr></thead>
 <tbody>{clip_rows}</tbody></table>
+<div class=sec>ALERT HISTORY</div><table class=resp>
+<thead><tr><th>WHEN (ET)</th><th>FEED</th><th>NATURE</th><th>ADDRESS</th><th>RESULT</th></tr></thead>
+<tbody>{hist_html}</tbody></table>
 <div class=sec>EVENT LOG</div><table class=resp>
 <thead><tr><th>WHEN</th><th>FEED</th><th>EVENT</th></tr></thead>
 <tbody>{ev_rows}</tbody></table>
