@@ -114,7 +114,7 @@ SEEN_FILE = Path(os.environ.get("SEEN_FILE", "./segments/seen.json"))
 FDNY_INBOX = SEG_DIR / "fdny_inbox.jsonl"
 FDNY_IDS = SEG_DIR / "fdny_ids.json"
 
-SOURCE_LABEL = {"hatzolah": "Hatzolah Brooklyn", "sullivan": "Sullivan Co Fire/EMS",
+SOURCE_LABEL = {"hatzolah": "Hatzolah Dispatch", "sullivan": "Sullivan Co Fire/EMS",
                 "fdny": "FDNY Brooklyn Dispatch"}
 
 
@@ -188,7 +188,7 @@ _GEOCODE_ABBREV = {"Ave": "Avenue", "St": "Street", "Rd": "Road", "Blvd": "Boule
 def _geocode_variants(addr: str, profile: str) -> list[str]:
     """Query rewrites: expand abbreviations; '14th Ave between 50th & 51st St' ->
     '14th Avenue & 51st Street'; locality hints per feed."""
-    base = addr if ", NY" in addr else f"{addr}, NY"
+    base = addr if re.search(r",\s*(?:NY|NJ)$", addr, re.I) else f"{addr}, NY"
     street, _, tail = base.partition(",")
     for a, b in _GEOCODE_ABBREV.items():
         street = re.sub(rf"\b{a}\b", b, street)
@@ -217,6 +217,8 @@ def _geocode_variants(addr: str, profile: str) -> list[str]:
         # is a guess ("Brooklyn" by default) - also try de-biased queries
         variants.append(f"{street}, Sullivan County, NY")
         variants.append(f"{street}, NY")
+        if base.endswith(", NJ"):
+            variants.insert(0, f"{street}, Bergen County, NJ")
     return [v for i, v in enumerate(variants) if v not in variants[:i]]
 
 
@@ -298,8 +300,12 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
     Sullivan: Nominatim + county check."""
     p = profile.lower()
     if "fdny" in p or "hatzalah" in p or "hatzolah" in p:
-        boroughs = ["Brooklyn"] if "fdny" in p else ["Brooklyn", "Queens", "Manhattan", "Bronx"]
+        boroughs = ["Brooklyn"] if "fdny" in p else ["Brooklyn", "Queens", "Manhattan", "Bronx", "Staten Island"]
+        if addr.upper().endswith(", NJ"):
+            boroughs = []
         for q in _geocode_variants(addr, profile):
+            if not boroughs:
+                break  # NJ uses county-aware Nominatim; NYC search is invalid.
             label, lat, lon = await _planning_labs(q, boroughs)
             if label == "":
                 break  # network failure -> Nominatim fallback
@@ -328,7 +334,21 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                     # (the shul name) was ignored (bad post 9/28 12:46 PM)
                     logging.info("geocode: rejected partial-token fallback: %s -> %s", q, label)
                     continue
-                return True, False, label, lat, lon, (label.split(",")[1].strip() if "," in label else "")
+                found_borough = label.split(",")[1].strip() if "," in label else ""
+                requested_area = addr.split(",")[1].strip() if "," in addr else ""
+                if "hatzal" in p or "hatzol" in p:
+                    permitted_boroughs = {
+                        "brooklyn": {"brooklyn"}, "queens": {"queens"},
+                        "manhattan": {"manhattan", "new york"},
+                        "bronx": {"bronx"}, "riverdale": {"bronx"},
+                        "staten island": {"staten island"},
+                    }
+                    expected = permitted_boroughs.get(requested_area.lower())
+                    if expected is not None and found_borough.lower() not in expected:
+                        continue
+                    if requested_area.lower() in ("rockland", "monsey"):
+                        continue
+                return True, False, label, lat, lon, found_borough
         if "fdny" in p:
             return False, False, "", None, None, ""
         # hatzalah: fall through to Nominatim for non-NYC (5 Towns, Rockland...)
@@ -339,10 +359,24 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
         if res:
             disp = str(res[0].get("display_name", ""))
             ad = res[0].get("address") or {}
-            if ("hatzal" in p or "hatzol" in p) and str(ad.get("state", "")) not in ("New York", "NY"):
-                logging.info("geocode: rejected out-of-state hit: %s -> %s", q, disp)
-                await asyncio.sleep(1.1)
-                continue
+            state = str(ad.get("state", ""))
+            county_name = str(ad.get("county", ""))
+            if "hatzal" in p or "hatzol" in p:
+                # An explicit NJ address must resolve to Bergen County. NY hits
+                # must not cross into excluded Rockland or unspecified Catskills.
+                permitted = ((state in ("New York", "NY") and
+                              ("Rockland" not in county_name) and
+                              (not addr.upper().endswith(", NJ")) and
+                              (county_name in ("Kings County", "Queens County", "New York County",
+                                               "Bronx County", "Richmond County", "Sullivan County",
+                                               "Nassau County") or
+                               any(x in county_name for x in ("Kings", "Queens", "Bronx", "Richmond", "Sullivan", "Nassau"))))
+                             or (state in ("New Jersey", "NJ") and "Bergen" in county_name
+                                 and addr.upper().endswith(", NJ")))
+                if not permitted:
+                    logging.info("geocode: rejected outside Hatzalah coverage: %s -> %s", q, disp)
+                    await asyncio.sleep(1.1)
+                    continue
             # coverage gate: these channels serve NYC metro + the Catskills -
             # in-state is not enough ('3457 Northland Avenue' fuzzy-matched
             # Buffalo, 470km away, and posted to the Brooklyn group 9/28 14:26)
@@ -418,6 +452,29 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
             county = str(ad.get("county", ""))
             locality = str(ad.get("village") or ad.get("town") or ad.get("city")
                            or ad.get("hamlet") or ad.get("borough") or "")
+            if "fdny" in p and ("Kings" not in county_name and
+                                 "Brooklyn" not in str(ad.get("borough", ""))):
+                continue
+            if "sullivan" in p and "Sullivan" not in county_name:
+                continue
+            # Explicit dispatch locality wins over a fuzzy same-road hit in
+            # another city. This check is intentionally stricter for Bergen.
+            requested_area = addr.split(",")[1].strip() if "," in addr else ""
+            if ("hatzal" in p or "hatzol" in p) and requested_area:
+                location_names = " ".join(str(ad.get(k) or "") for k in
+                                          ("city", "town", "village", "hamlet", "borough", "suburb"))
+                if addr.upper().endswith(", NJ") and requested_area.lower() not in location_names.lower():
+                    continue
+                if requested_area.lower() in ("brooklyn", "queens", "manhattan", "bronx", "staten island"):
+                    county_expected = {"brooklyn": "Kings", "queens": "Queens",
+                                       "manhattan": "New York", "bronx": "Bronx",
+                                       "staten island": "Richmond"}[requested_area.lower()]
+                    if county_expected not in county_name and requested_area.lower() not in location_names.lower():
+                        continue
+                if requested_area.lower() == "riverdale" and "Bronx" not in county_name:
+                    continue
+                if requested_area.lower() in ("rockland", "monsey"):
+                    continue
             lat = lon = None
             try:
                 lat, lon = float(res[0].get("lat")), float(res[0].get("lon"))
@@ -457,7 +514,15 @@ async def _intersection_point(address: str, cross: str) -> tuple:
     names = list(dict.fromkeys([x for group in alt for x in group]))
     pat = "^(" + "|".join(re.escape(n) for n in names) + ")$"
     hdrs = {"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"}
-    q = f'[out:json][timeout:15];way["name"~"{pat}",i](40.55,-74.06,40.75,-73.85);out geom;'
+    # The old Brooklyn-only bbox silently rejected Fair Lawn and Queens.
+    # Use the spoken region to search the appropriate map; a NJ candidate
+    # remains subject to Bergen County verification by the address geocoder.
+    area = address.lower()
+    bbox = ("40.75,-74.30,41.13,-73.87" if area.endswith(", nj") else
+            "41.35,-75.10,42.00,-74.25" if "sullivan" in area or any(
+                n in area for n in ("monticello", "fallsburg", "woodridge", "liberty")) else
+            "40.48,-74.26,40.94,-73.70")
+    q = f'[out:json][timeout:15];way["name"~"{pat}",i]({bbox});out geom;'
     data = None
     for ep in _OVERPASS_EPS:
         try:
@@ -1018,25 +1083,42 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     verified_label = ""
     lat = lon = None
     locality = ""
+    if profile.lower().startswith(("hatzalah", "zello-hatzalah")) and re.search(
+            r"\b(?:rockland|monsey|spring valley|new square|suffern|"
+            r"haverstraw|garnerville|airmont|chestnut ridge)\b",
+            hit.get("excerpt") or "", re.I):
+        stats.event(profile, f"suppressed (Rockland dispatch): {hit['address']}")
+        return "suppressed"
     if GEOCODE_VERIFY:
         # Intersections require BOTH spoken roads at one point. The ordinary
         # geocoder can otherwise certify the first street only.
         spoken_location = hit["address"].split(",")[0]
         if " & " in spoken_location and not re.match(r"^\d+\s", spoken_location):
             side_a, side_b = (p.strip() for p in spoken_location.split("&", 1))
-            lat, lon = await _intersection_point(spoken_location, side_b)
+            lat, lon = await _intersection_point(hit["address"], side_b)
             verified = lat is not None
+            # Spatially constrained road-name intersection. If map service
+            # is unavailable, verified stays false and alert is suppressed.
             verified_label = hit["address"] if verified else ""
             locality = hit["address"].split(",")[1].strip() if verified and "," in hit["address"] else ""
         else:
             verified, in_sullivan, verified_label, lat, lon, locality = await geocode_verify(hit["address"], profile)
         if (verified and locality and profile.lower().startswith(("hatzalah", "zello-hatzalah"))
-                and locality.lower() not in ("brooklyn", "queens", "manhattan", "bronx", "new york")):
-            fixed = re.sub(r",\s*[^,]+,\s*NY$", f", {locality}, NY", hit["address"])
+                and locality.lower() not in ("brooklyn", "queens", "manhattan", "bronx", "new york", "staten island")):
+            state_suffix = "NJ" if hit["address"].upper().endswith(", NJ") else "NY"
+            fixed = re.sub(r",\s*[^,]+,\s*(?:NY|NJ)$", f", {locality}, {state_suffix}", hit["address"])
             if fixed != hit["address"]:
                 logging.info("[%s] area corrected by geocode: %s -> %s", profile, hit["address"], fixed)
                 stats.event(profile, f"area corrected: {hit['address']} -> {fixed}")
                 hit["address"] = fixed
+        if profile.lower().startswith(("hatzalah", "zello-hatzalah")):
+            # The dispatch explicitly names an excluded chapter. Never let a
+            # generic street geocode in Brooklyn override that place name.
+            if re.search(r"\b(?:rockland|monsey|spring valley|new square|suffern|"
+                         r"haverstraw|garnerville|airmont|chestnut ridge)\b",
+                         hit.get("excerpt") or "", re.I):
+                stats.event(profile, f"suppressed (Rockland dispatch): {hit['address']}")
+                return "suppressed"
         if profile == "sullivan" and verified and not in_sullivan:
             logging.info("[%s] suppressed (verified outside Sullivan Co): %s", profile, hit["address"])
             stats.event(profile, f"suppressed (outside Sullivan Co): {hit['nature']} @ {hit['address']}")
@@ -1118,8 +1200,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             if verified_label:
                 r0 = scol.match_colony_for_verified_address(verified_label)
                 colony = r0.colony_name if r0.found else None
-            if not colony:
-                colony = scol.match_sullivan_colony(hit.get("excerpt") or "")
+            # No transcript/name fallback: only a verified street address may
+            # identify a colony. Similar channel names are never job location.
         except Exception as e:  # noqa: BLE001
             logging.warning("colony match failed: %s", e)
     box_disp = ""
@@ -1183,6 +1265,42 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         elif heard:
             logging.info("[%s] box %s not in lookup DB - not posted", profile, heard)
             stats.event(profile, f"box {heard} not in lookup DB (not posted)")
+    # A five-digit box+house run can equally be a four-digit box plus a
+    # one-digit house, or a two-digit box plus a three-digit house. Resolve
+    # ONLY when the actual box lookup independently matches the heard cross
+    # or verified location. 83255 North Henry at Norman is Box 0083 + 255,
+    # not Box 0832 + 55 and not the unrelated 8355.
+    raw_run = hit.get("raw_box_run") or ""
+    if profile == "fdny" and len(raw_run) == 5 and hit.get("box_glue_ambiguous"):
+        street_tail = re.sub(r"^\d+\s+", "", hit["address"].split(",", 1)[0])
+        heard_cross = hit.get("cross") or ""
+        choices = []
+        for n in (2, 3, 4):
+            num = raw_run[:n].zfill(4)
+            house = raw_run[n:]
+            if not house or house.startswith("0"):
+                continue
+            candidate = f"{house} {street_tail}, Brooklyn, NY"
+            yes, _, label, la, lo, loc = await geocode_verify(candidate, "fdny")
+            if not yes or la is None or lo is None:
+                continue
+            rr = await _box_lookup(num)
+            candidate_street = _rare_tokens(street_tail)
+            cross_tokens = _rare_tokens(heard_cross)
+            matching = [(place, bor) for place, bor in rr if bor == "Brooklyn"
+                        and (candidate_street & _rare_tokens(place))
+                        and (cross_tokens & _rare_tokens(place))]
+            if matching:
+                choices.append((num, candidate, label, la, lo, loc))
+        if len(choices) != 1:
+            stats.event(profile, f"suppressed (ambiguous five-digit box/house): {raw_run}")
+            ops_log(f"suppressed (ambiguous five-digit box/house): {raw_run}")
+            return "suppressed"
+        box_disp, hit["address"], verified_label, lat, lon, locality = choices[0]
+        box_mismatch = False
+        box_loc = ""
+        verified = True
+        stats.event(profile, f"five-digit box/house independently resolved: Box {box_disp} @ {hit['address']}")
     # Six-digit glued box/house runs have two plausible splits. Never post
     # an uncorroborated guess or a mismatch warning as though the guessed box
     # were spoken. A box location sharing the verified address/cross is the
@@ -1267,10 +1385,13 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         r"overdose|stroke|cva|seizure|convuls|fall|fell|bleeding|hemorrhage|"
         r"chest pain|drown|syncope|faint|passed out|diabet|sugar|allergic|"
         r"anaphyla|bee sting|abdominal|stomach|altered|disoriented|"
-        r"unconscious|aided|trauma|ped(?:estrian)?|mva|mvc|accident|"
+        r"unconscious|aided|trauma|general illness|generally ill|gi distress|"
+        r"sick person|medical emergency|ped(?:estrian)?|mva|mvc|accident|"
         r"collision|rollover|entrap)\w*\b", nature, re.I)
     icon = "\N{AMBULANCE}" if medical else "\N{FIRE}"
     lines = [f"*{icon} {nature}*", "", addr_line]
+    if hit.get("apartment"):
+        lines.append(hit["apartment"])
     if crosses:
         lines.append(f"between {crosses}" if "&" in crosses else f"off {crosses}")
     if box:
