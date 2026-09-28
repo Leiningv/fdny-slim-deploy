@@ -199,6 +199,16 @@ def _geocode_variants(addr: str, profile: str) -> list[str]:
         variants.append(f"{m.group(1).strip()} & {m.group(3).strip()}{',' + tail if tail else ''}")
         variants.append(f"{m.group(1).strip()} & {m.group(2).strip()}{',' + tail if tail else ''}")
     variants.append(street + ("," + tail if tail else ""))
+    # digit-word road names: the map spells them out ('Marcel 4 Road' ->
+    # 'Marcel Four Road', Eldred 9/28). Lookahead to the street type keeps
+    # house numbers and ordinals untouched.
+    _SPELL = {"1": "One", "2": "Two", "3": "Three", "4": "Four", "5": "Five",
+              "6": "Six", "7": "Seven", "8": "Eight", "9": "Nine", "10": "Ten"}
+    _md = re.search(r"\b(\d{1,2})\b(?=\s+(?:road|rd|street|st|avenue|ave|drive|dr|"
+                    r"lane|ln|court|ct|place|pl|boulevard|blvd)\b)", street, re.I)
+    if _md and _md.group(1) in _SPELL:
+        spelled = street[:_md.start()] + _SPELL[_md.group(1)] + street[_md.end():]
+        variants.append(spelled + ("," + tail if tail else ""))
     if profile == "sullivan":
         variants.append(f"{street}, Sullivan County, NY")
         variants.append(f"{street}, Monticello, NY")
@@ -256,6 +266,31 @@ async def _planning_labs(addr: str, allowed_boroughs: list[str]) -> tuple:
         return "", None, None
 
 
+def _street_sides(core: str) -> list:
+    return [s.strip() for s in re.split(r"\s+&\s+", core) if s.strip()]
+
+
+def _street_token_groups(side: str) -> list:
+    """Rare street tokens as groups of equivalent forms: an ordinal and its
+    digit form ('64th'/'64') are ONE requirement - the map normalizes to the
+    digit form. Every group of at least one side must hit for a street to
+    verify ('Israel Ocean Parkway' passed on 'ocean' alone 9/28 12:46 PM;
+    'Monticello 4 Road' matched the VILLAGE name 9/28 7:38 AM)."""
+    toks = {t for t in re.split(r"[\s,.&'-]+", side.lower())
+            if ((len(t) >= 4) or (len(t) == 1 and t.isalpha()))
+            and t not in _ADDR_GENERIC and not t.isdigit()}
+    groups = []
+    for t in toks:
+        m_ord = re.fullmatch(r"(\d+)(?:st|nd|rd|th)", t)
+        groups.append({t, m_ord.group(1)} if m_ord else {t})
+    return groups
+
+
+def _side_verifies(side: str, target: str) -> bool:
+    gs = _street_token_groups(side)
+    return bool(gs) and all(any(_tok_hit(v, target) for v in g) for g in gs)
+
+
 async def geocode_verify(addr: str, profile: str = "") -> tuple:
     """Returns (verified, in_sullivan_county, verified_label, lat, lon, locality).
     NYC profiles: Planning Labs with the old system's borough filters (FDNY
@@ -273,17 +308,12 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                 # matching "Shore Road Park") - the label must share a rare
                 # street token with the query, else it's not this address
                 core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", q.split(",")[0]).strip().lower()
-                qtoks = {t for t in re.split(r"[\s,.&'-]+", core)
-                         if ((len(t) >= 4) or (len(t) == 1 and t.isalpha()))
-                         and t not in _ADDR_GENERIC and not t.isdigit()}
-                # Planning Labs normalizes ordinals: '64th St' -> '64 STREET' -
-                # the token '64th' never matches; add the digit form ('730 64th
-                # St' was falsely 'not confirmed' 9/28)
-                qtoks |= {re.sub(r"(\d+)(?:st|nd|rd|th)$", r"\1", t)
-                          for t in list(qtoks)
-                          if re.fullmatch(r"\d+(?:st|nd|rd|th)", t)}
                 ltok = label.lower()
-                if not qtoks:
+                # (the query's '&' reaches PL unencoded, so intersection
+                # queries geocode the LEFT street - side-aware matching is
+                # what keeps 'X & Y' verifiable at all)
+                sides = _street_sides(core)
+                if not any(_street_token_groups(s) for s in sides):
                     # no rare token at all ('The Street' -> 'the street'):
                     # type-only chatter verifies against ANY fuzzy hit
                     # ('1 THE ST OF CULTURE' posted 6:25 AM 9/28). Short
@@ -292,8 +322,11 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                     if len(core.split()) <= 2 or core not in ltok:
                         logging.info("geocode: rejected generic-street fallback: %s -> %s", q, label)
                         continue
-                elif not any(_tok_hit(t, ltok) for t in qtoks):
-                    logging.info("geocode: rejected wrong-street fallback: %s -> %s", q, label)
+                elif not any(_side_verifies(s, ltok) for s in sides):
+                    # EVERY distinctive word of one side must hit - 'Israel
+                    # Ocean Parkway' verified on 'ocean' alone while 'israel'
+                    # (the shul name) was ignored (bad post 9/28 12:46 PM)
+                    logging.info("geocode: rejected partial-token fallback: %s -> %s", q, label)
                     continue
                 return True, False, label, lat, lon, (label.split(",")[1].strip() if "," in label else "")
         if "fdny" in p:
@@ -330,21 +363,58 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
             except (TypeError, ValueError):
                 pass
             core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", q.split(",")[0]).strip().lower()
-            qtoks = {t for t in re.split(r"[\s,.&'-]+", core)
-                     if ((len(t) >= 4) or (len(t) == 1 and t.isalpha()))
-                     and t not in _ADDR_GENERIC and not t.isdigit()}
-            qtoks |= {re.sub(r"(\d+)(?:st|nd|rd|th)$", r"\1", t)
-                      for t in list(qtoks)
-                      if re.fullmatch(r"\d+(?:st|nd|rd|th)", t)}
-            if not qtoks:
-                if len(core.split()) <= 2 or core not in disp.lower():
-                    logging.info("geocode: rejected generic-street hit: %s -> %s", q, disp)
+
+            def _toks_of(side: str) -> set:
+                toks = {t for t in re.split(r"[\s,.&'-]+", side)
+                        if ((len(t) >= 4) or (len(t) == 1 and t.isalpha()))
+                        and t not in _ADDR_GENERIC and not t.isdigit()}
+                toks |= {re.sub(r"(\d+)(?:st|nd|rd|th)$", r"\1", t)
+                         for t in list(toks)
+                         if re.fullmatch(r"\d+(?:st|nd|rd|th)", t)}
+                return toks
+
+            typed = bool(re.search(
+                r"\b(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|place|pl|"
+                r"lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter|way)\b", core))
+            if typed:
+                # street query: the heard street must match the returned ROAD
+                # component, not the locality half of the display name -
+                # 'Monticello 4 Road' fuzzy-matched a house on FORESTBURGH
+                # Road because 'monticello' appears as the VILLAGE (real
+                # dispatch: '2 Marcel Four Road', Eldred; bad post 9/28 7:38
+                # AM). And EVERY rare token of one side must hit - 'Israel
+                # Ocean Parkway' passed on 'ocean' alone (9/28 12:46 PM).
+                road = " ".join(str(ad.get(k) or "") for k in
+                                ("road", "pedestrian", "footway", "residential",
+                                 "cycleway", "path")).lower()
+                if not road.strip():
+                    logging.info("geocode: rejected no-road hit: %s -> %s", q, disp)
                     await asyncio.sleep(1.1)
                     continue
-            elif not any(_tok_hit(t, disp.lower()) for t in qtoks):
-                logging.info("geocode: rejected wrong-street hit: %s -> %s", q, disp)
-                await asyncio.sleep(1.1)
-                continue
+                ok = False
+                for side in _street_sides(core):
+                    if _side_verifies(side, road):
+                        ok = True
+                        break
+                    if not _street_token_groups(side) and side and side in road:
+                        ok = True
+                        break
+                if not ok:
+                    logging.info("geocode: rejected wrong-road hit: %s -> %s (road: %s)",
+                                 q, disp, road)
+                    await asyncio.sleep(1.1)
+                    continue
+            else:
+                qtoks = _toks_of(core)
+                if not qtoks:
+                    if len(core.split()) <= 2 or core not in disp.lower():
+                        logging.info("geocode: rejected generic-street hit: %s -> %s", q, disp)
+                        await asyncio.sleep(1.1)
+                        continue
+                elif not any(_tok_hit(t, disp.lower()) for t in qtoks):
+                    logging.info("geocode: rejected wrong-street hit: %s -> %s", q, disp)
+                    await asyncio.sleep(1.1)
+                    continue
             county = str(ad.get("county", ""))
             locality = str(ad.get("village") or ad.get("town") or ad.get("city")
                            or ad.get("hamlet") or ad.get("borough") or "")
@@ -1024,18 +1094,6 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                         (inc_street and inc_street in sides):
                     box_disp = heard
                     break
-            if not box_disp and not verified:
-                # user rule 9/28: anchor on the box - when the heard address
-                # can't be confirmed, the box location is still true proximity;
-                # post number + location instead of dropping the box
-                pick = next((l for l, b in rows
-                             if locality and b.lower() == locality.lower()), rows[0][0])
-                box_disp = heard
-                box_loc = re.sub(r"\bAt\b", "at", pick.title())
-                stats.event(profile, f"box as proximity (address unconfirmed): "
-                                     f"Box {heard} - {box_loc}")
-                ops_log(f"box as proximity (address unconfirmed): Box {heard} - {box_loc} "
-                        f"for {hit['address']}")
             if not box_disp and verified:
                 # user verdict 9/28: never drop the box - it anchors. First try a
                 # box-supported address correction (whisper ordinal digit-drop:
@@ -1049,6 +1107,18 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                             f"(Box {heard})")
                     hit["address"] = corrected_addr
                     box_disp = heard
+                elif locality and not any(b.lower() == locality.lower() for _, b in rows):
+                    # the heard box exists ONLY in other boroughs than the
+                    # verified address - the digits are whisper-glued/mangled
+                    # ('box 957 70 Herkimer' -> 9577 = a QUEENS box posted on a
+                    # Brooklyn job with a flag, 9/28 8:03 AM; his verdict: a
+                    # wrong-borough box never posts). Kill it - closest-box
+                    # from the geocoded address takes over below.
+                    stats.event(profile, f"box killed (borough mismatch): heard {heard} ("
+                                + "; ".join(f"{l} {b}" for l, b in rows)
+                                + f") vs {hit['address']} ({locality})")
+                    ops_log(f"box killed (borough mismatch): heard {heard} vs "
+                            f"{hit['address']} ({locality})")
                 else:
                     pick = next((l for l, b in rows
                                  if locality and b.lower() == locality.lower()), rows[0][0])

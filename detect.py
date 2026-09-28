@@ -400,6 +400,13 @@ def extract_audio_crosses(text: str) -> str | None:
         r = _pair(m.group(1), m.group(2))
         if r:
             return r
+    # 'off Nostrand Avenue and Bedford Avenue' - crosses spoken after the
+    # address (dropped on the 8:03 AM Herkimer job 9/28)
+    m = re.search(rf"\boff\s+({_ANCH})\s+and\s+({_ANCH})\b", t, re.I)
+    if m:
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
     # between with one bare side: "between North Cannon and Victory Boulevard"
     m = re.search(rf"\bbetween\s+({_BARE})\s+and\s+({_ANCH})\b", t, re.I)
     if m:
@@ -507,6 +514,24 @@ _FDNY_SKIP_RE = re.compile(
     r"available|in service)\b", re.I)
 
 
+
+def _split_box_glue(t: str) -> str:
+    """Whisper glues the house number onto the box readout ('box 957 70
+    Herkimer' -> 'box 95770 herkimer'): re-split over-long digit runs so the
+    box keeps 2-4 digits and the remainder is a plausible house number
+    (starts 1-9). 5+ contiguous digits after 'box' is always glue - FDNY
+    boxes are at most 4 digits (bad post 9/28 8:03 AM: box 957 + 70 Herkimer
+    posted as box 9577)."""
+    def _rep(m):
+        run = m.group(1)
+        for blen in (4, 3, 2):
+            house = run[blen:]
+            if 1 <= len(house) <= 4 and house[0] != "0":
+                return f"box {run[:blen]}, {house}"
+        return m.group(0)
+    return re.sub(r"\bbox\s+(\d{5,7})\b", _rep, t, flags=re.I)
+
+
 def detect_box(text: str) -> str | None:
     t = text.lower()
     # user ruling 9/28 13:36: only a spoken 'box NNNN' counts - 'alarm 2584'
@@ -575,6 +600,27 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         named = extract_named_cross(text)
         if named:
             return _with_area(named, profile, text)
+    else:
+        # house number on a named street for the EMS/Sullivan grammar ('67 Old
+        # Ryan Road' posted bare 9/28; '2 Marcel 4 Road' lost the 2 - one
+        # trailing all-digit word is allowed inside the name: Marcel 4 Road =
+        # the map's Marcel Four Road)
+        hn = re.search(
+            r"\b(\d{1,5})\s+([a-z][a-z'\-]*(?:\s+[a-z][a-z'\-]*){0,2}"
+            r"(?:\s+\d{1,2})?)\s+"
+            r"(street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
+            r"lane|ln|parkway|pkwy)\b", _norm(text).lower())
+        if hn:
+            w2 = hn.group(2).split()
+            while w2 and w2[0] in _NAME_STOP:
+                w2.pop(0)
+            nm = " ".join(w2)
+            if nm and nm not in _NAME_STOP:
+                typ = {"st": "street", "ave": "avenue", "rd": "road", "dr": "drive",
+                       "blvd": "boulevard", "pl": "place", "ln": "lane",
+                       "pkwy": "parkway"}.get(hn.group(3), hn.group(3))
+                return _with_area(f"{hn.group(1)} {_addr_title(nm + ' ' + typ)}",
+                                  profile, text)
     hwy = extract_highway_intersection(text, profile)
     if hwy:
         return _with_area(hwy, profile, text)
@@ -624,8 +670,15 @@ def get_nature(text: str, profile: str = "") -> str:
     t = re.sub(r"firefight(?:er|ers|ing)?", " ", t)
 
     def vt(pattern: str) -> str:
-        m = re.search(pattern, t)
-        return _addr_title(m.group(0)) if m else ""
+        # user ruling 9/28 ('put something that was said'): a nature word
+        # immediately followed by a bare number is unit chatter, not a spoken
+        # nature - 'Rubbish 265' was a mangled unit readout and posted RUBBISH
+        # on a fainting call. Skip digit-followed occurrences.
+        for m in re.finditer(pattern, t):
+            if re.match(r"\s+\d{2,5}\b", t[m.end():]):
+                continue
+            return _addr_title(m.group(0))
+        return ""
 
     v = vt(r"\b(?:all hands|10-75|10 75|working fire|second alarm)\b")
     if v: return v
@@ -657,7 +710,7 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\bdrown\w*\b")
     if v: return v
-    v = vt(r"\b(?:syncope|fainted|passed out)\b")
+    v = vt(r"\b(?:syncope|faint(?:ed|ing)?|passed out)\b")
     if v: return v
     v = vt(r"\bdiabet\w*\b|\b(?:low|high)\s+(?:blood\s+)?sugar\b")
     if v: return v
@@ -717,8 +770,15 @@ def get_nature(text: str, profile: str = "") -> str:
     # transmission-type fallbacks are LAST RESORT - content natures above
     # always win ('phone alarm... fire in a private dwelling' must post the
     # fire, not the alarm type; 6:04 AM E 84th St job 9/28)
-    v = vt(r"\b(?:fire|smoke|automatic|smoke detector|co)\s+alarm\b|\balarm activation\b|\bclass\s*3\b")
+    v = vt(r"\b(?:fire|smoke|automatic|smoke detector|co)\s+alarm\b|\balarm activation\b")
     if v: return v
+    # user ruling 9/28 19:54: on FDNY a class-3 readout posts as 'Automatic
+    # Alarm', never 'Class 3'. NOT routed through vt(): the readout number
+    # follows directly ('class 3 383') and must not trip the unit-chatter
+    # digit-skip.
+    m3 = re.search(r"\bclass\s*3\b", t)
+    if m3:
+        return "Automatic Alarm" if profile == "fdny" else _addr_title(m3.group(0))
     v = vt(r"\bstill alarm\b")
     if v: return v
     v = vt(r"\bphone alarm\b")
@@ -810,7 +870,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     profile = profile.removeprefix("zello-")  # zello-* reuses base grammar
     if profile == "hatzalah":  # source label spelling -> grammar spelling
         profile = "hatzolah"
-    t = _norm(text)
+    t = _split_box_glue(_norm(text))
     if len(t) < 10:
         return None
     any_units = _ANY_UNITS_RE.search(t)
