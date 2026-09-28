@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import alert_waha
 import detect
 import ingest
@@ -182,31 +183,38 @@ async def _nominatim(q: str):
         return None
 
 
-async def _planning_labs(addr: str, allowed_boroughs: list[str]) -> str | None:
-    """NYC Planning Labs geosearch (free, keyless). Returns the verified label
-    when the top hit is in an allowed borough, else None. Network error -> ''."""
+async def _planning_labs(addr: str, allowed_boroughs: list[str]) -> tuple:
+    """NYC Planning Labs geosearch (free, keyless). Returns (label, lat, lon)
+    when the top hit is in an allowed borough, else (None, None, None).
+    Network error -> ('', None, None)."""
     try:
         q = addr.replace(" ", "%20")
         url = f"https://geosearch.planninglabs.nyc/v2/search?text={q}&size=1"
         async with aiohttp.ClientSession() as s:
             async with s.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
                 if r.status != 200:
-                    return ""
+                    return "", None, None
                 data = await r.json()
         feats = data.get("features") or []
         if not feats:
-            return None
-        props = feats[0].get("properties") or {}
+            return None, None, None
+        feat = feats[0]
+        props = feat.get("properties") or {}
         borough = (props.get("borough") or "").lower()
         if borough not in [b.lower() for b in allowed_boroughs]:
-            return None
-        return str(props.get("label") or "") or None
+            return None, None, None
+        coords = (feat.get("geometry") or {}).get("coordinates") or []
+        lat = lon = None
+        if len(coords) >= 2:
+            lon, lat = float(coords[0]), float(coords[1])
+        label = str(props.get("label") or "") or None
+        return label, lat, lon
     except Exception:  # noqa: BLE001
-        return ""
+        return "", None, None
 
 
-async def geocode_verify(addr: str, profile: str = "") -> tuple[bool, bool, str]:
-    """Returns (verified, in_sullivan_county, verified_label).
+async def geocode_verify(addr: str, profile: str = "") -> tuple:
+    """Returns (verified, in_sullivan_county, verified_label, lat, lon).
     NYC profiles: Planning Labs with the old system's borough filters (FDNY
     Brooklyn-only; Hatzalah Brooklyn/Queens/Manhattan/Bronx), Nominatim fallback.
     Sullivan: Nominatim + county check."""
@@ -214,24 +222,100 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple[bool, bool, str]
     if "fdny" in p or "hatzalah" in p or "hatzolah" in p:
         boroughs = ["Brooklyn"] if "fdny" in p else ["Brooklyn", "Queens", "Manhattan", "Bronx"]
         for q in _geocode_variants(addr, profile):
-            label = await _planning_labs(q, boroughs)
+            label, lat, lon = await _planning_labs(q, boroughs)
             if label == "":
                 break  # network failure -> Nominatim fallback
             if label:
-                return True, False, label
+                return True, False, label, lat, lon
         if "fdny" in p:
-            return False, False, ""
+            return False, False, "", None, None
         # hatzalah: fall through to Nominatim for non-NYC (5 Towns, Rockland...)
     for q in _geocode_variants(addr, profile):
         res = await _nominatim(q)
         if res is None:
-            return False, False, ""  # network/API failure: don't burn retries
+            return False, False, "", None, None  # network/API failure: don't burn retries
         if res:
             disp = str(res[0].get("display_name", ""))
             county = str((res[0].get("address") or {}).get("county", ""))
-            return True, ("Sullivan" in county or "Sullivan County" in disp), disp
+            lat = lon = None
+            try:
+                lat, lon = float(res[0].get("lat")), float(res[0].get("lon"))
+            except (TypeError, ValueError):
+                pass
+            return True, ("Sullivan" in county or "Sullivan County" in disp), disp, lat, lon
         await asyncio.sleep(1.1)  # nominatim 1 req/s
-    return False, False, ""
+    return False, False, "", None, None
+
+
+async def _cross_streets(lat: float, lon: float, address: str) -> tuple:
+    """Cross streets via Overpass (free, keyless): ways sharing a node with the
+    job's own street truly cross it. Returns (crosses, exact) - ('A & B', True),
+    or ('A & B', False) when falling back to nearest streets, or (None, False)."""
+    import math
+    q = (f'[out:json][timeout:15];way(around:250,{lat},{lon})'
+         f'[highway][name];out tags geom;')
+    hdrs = {"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"}
+    data = None
+    for endpoint in ("https://overpass-api.de/api/interpreter",
+                     "https://overpass.kumi.systems/api/interpreter"):
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(endpoint, data={"data": q}, headers=hdrs,
+                                  timeout=aiohttp.ClientTimeout(total=18)) as r:
+                    if r.status != 200:
+                        continue
+                    data = await r.json()
+                    break
+        except Exception:  # noqa: BLE001
+            continue
+    if data is None:
+        return None, False
+    skip_hw = {"service", "footway", "path", "track", "cycleway", "pedestrian",
+               "steps", "construction", "proposed", "corridor", "bus_stop"}
+    own = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", address).strip().lower()
+    own = re.sub(r"[,.;].*$", "", own).strip()
+    cos_lat = math.cos(math.radians(lat))
+
+    def _dist2(geom):
+        return min(((g.get("lon", lon) - lon) * cos_lat * 111320) ** 2 +
+                   ((g.get("lat", lat) - lat) * 110540) ** 2 for g in geom)
+
+    own_nodes = set()
+    cands = []
+    for el in data.get("elements") or []:
+        tags = el.get("tags") or {}
+        name = (tags.get("name") or "").strip()
+        hw = tags.get("highway")
+        geom = el.get("geometry") or []
+        if not name or hw in skip_hw or not geom:
+            continue
+        nl = name.lower().strip()
+        is_own = (nl == own or (len(own) >= 6 and own in nl)
+                  or (len(nl) >= 6 and nl in own))
+        if is_own:
+            for g in geom:
+                own_nodes.add((round(g.get("lat", 0), 6), round(g.get("lon", 0), 6)))
+        else:
+            cands.append((name, geom))
+    rows = {}
+    for name, geom in cands:
+        crosses = any((round(g.get("lat", 0), 6), round(g.get("lon", 0), 6)) in own_nodes
+                      for g in geom)
+        d2 = _dist2(geom)
+        nl = name.lower()
+        if nl not in rows or (crosses and not rows[nl][1]) or d2 < rows[nl][0]:
+            rows[nl] = (d2, crosses, name)
+    if not rows:
+        return None, False
+    exact = sorted((v for v in rows.values() if v[1]))
+    approx = sorted((v for v in rows.values() if not v[1]))
+    if len(exact) >= 2:
+        return f"{exact[0][2]} & {exact[1][2]}", True
+    if len(exact) == 1 and approx:
+        return f"{exact[0][2]} & {approx[0][2]}", True
+    if len(approx) >= 2:
+        return f"{approx[0][2]} & {approx[1][2]}", False
+    return None, False
 
 
 async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None) -> str:
@@ -255,8 +339,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         ops_log(f"suppressed (Fall excluded): {hit['address']}")
         return "suppressed"
     verified_label = ""
+    lat = lon = None
     if GEOCODE_VERIFY:
-        verified, in_sullivan, verified_label = await geocode_verify(hit["address"], profile)
+        verified, in_sullivan, verified_label, lat, lon = await geocode_verify(hit["address"], profile)
         if profile == "sullivan" and verified and not in_sullivan:
             logging.info("[%s] suppressed (verified outside Sullivan Co): %s", profile, hit["address"])
             stats.event(profile, f"suppressed (outside Sullivan Co): {hit['nature']} @ {hit['address']}")
@@ -265,6 +350,20 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if not verified:
             text_out = text_out.replace(hit["address"], hit["address"] + " (not confirmed)", 1)
             stats.event(profile, f"unconfirmed address: {hit['address']}")
+    cross = (hit.get("cross") or "").strip()
+    if not cross and lat is not None and lon is not None and verified_label:
+        street_core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"])
+        street_core = re.sub(r"[,.;].*$", "", street_core).strip().lower()
+        if street_core and street_core in verified_label.lower():
+            cross, exact = await _cross_streets(lat, lon, hit["address"])
+            cross = cross or ""
+            if cross:
+                tag = "computed" if exact else "approx"
+                stats.event(profile, f"cross streets ({tag}): {cross}")
+    if cross:
+        text_out = text_out.replace(hit["address"], f"{hit['address']} — between {cross}", 1)
+    else:
+        ops_log(f"cross streets unresolved: {hit['nature']} @ {hit['address']}")
     if profile.lower().startswith(("sullivan", "hatzalah", "zello-sullivan", "zello-hatzalah")):
         try:
             import sullivan_colonies as scol
