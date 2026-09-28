@@ -1,8 +1,0 @@
-# fdny-slim — minimal deps, everything free. ffmpeg comes from imageio-ffmpeg (static binary) when no system ffmpeg exists.
-faster-whisper>=1.0.0
-aiohttp>=3.9.0
-imageio-ffmpeg>=0.5.0
-# zello ingest: WS client + RS256 JWT signing
-websocket-client>=1.7.0
-PyJWT>=2.8.0
-cryptography>=42.0.0
