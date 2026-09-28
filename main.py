@@ -30,8 +30,11 @@ NY = ZoneInfo("America/New_York")
 DEDUP_SEC = int(os.environ.get("DEDUP_SECONDS", str(30 * 60)))
 SEG_DIR = Path(os.environ.get("SEG_DIR", "./segments"))
 SEEN_FILE = Path(os.environ.get("SEEN_FILE", "./segments/seen.json"))
+FDNY_INBOX = SEG_DIR / "fdny_inbox.jsonl"
+FDNY_IDS = SEG_DIR / "fdny_ids.json"
 
-SOURCE_LABEL = {"hatzolah": "Hatzolah Brooklyn", "sullivan": "Sullivan Co Fire/EMS"}
+SOURCE_LABEL = {"hatzolah": "Hatzolah Brooklyn", "sullivan": "Sullivan Co Fire/EMS",
+                "fdny": "FDNY Brooklyn Dispatch"}
 
 
 def _load_env_file(path: Path = Path("config.env")) -> None:
@@ -180,6 +183,130 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
         await asyncio.sleep(2)
 
 
+def _load_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def _fdny_fetch_clip(url: str, m4a: Path, wav: Path) -> Path | None:
+    """Download one Calls audio file and convert to 16kHz mono WAV."""
+    import subprocess
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "fdny-slim/1.0",
+                          "Referer": "https://www.broadcastify.com/calls/"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = r.read()
+        if len(data) < 500:
+            return None
+        m4a.write_bytes(data)
+        rc = subprocess.call([
+            ingest.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(m4a), "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav)])
+        if rc != 0 or not wav.exists():
+            return None
+        return wav
+    except Exception as e:  # noqa: BLE001
+        logging.warning("[fdny] clip fetch failed: %s", e)
+        return None
+
+
+async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> None:
+    stats.mark_segment("fdny")
+    cid = str(call.get("id") or call.get("filename") or int(time.time()))
+    text = (call.get("transcription") or "").strip()
+    wav = None
+    url = call.get("audio_url") or ""
+    if url:
+        tmp.mkdir(parents=True, exist_ok=True)
+        wav = await asyncio.to_thread(_fdny_fetch_clip, url, tmp / f"{cid}.m4a", tmp / f"{cid}.wav")
+    if not text and wav is not None:
+        text = await asyncio.to_thread(transcribe.transcribe, wav)
+    if not text:
+        stats.event("fdny", "call with no transcription - detect skipped")
+        return
+    stats.mark_transcript("fdny", text)
+    logging.info("[fdny] heard: %s", text[:160])
+    if wav is not None:
+        clip_name = f"fdny-{int(time.time())}.wav"
+        await asyncio.to_thread(_archive_clip, wav, clip_name)
+        stats.mark_clip("fdny", clip_name, text)
+    for suffix in (".m4a", ".wav"):
+        try:
+            (tmp / f"{cid}{suffix}").unlink()
+        except Exception:  # noqa: BLE001
+            pass
+    hit = detect.analyze(text, "fdny")
+    if not hit:
+        return
+    key = f"fdny|{hit['nature']}|{hit['address']}"
+    now = time.time()
+    if now - seen.get(key, 0) < DEDUP_SEC:
+        logging.info("[fdny] deduped: %s @ %s", hit["nature"], hit["address"])
+        stats.event("fdny", f"deduped: {hit['nature']} @ {hit['address']}")
+        return
+    seen[key] = now
+    _save_seen(seen)
+    ok = await alert_waha.send_text(format_alert(hit))
+    stats.mark_alert("fdny", hit["nature"], hit["address"], ok)
+    _append_alert_log({"t": now, "feed": "fdny", "nature": hit["nature"],
+                       "address": hit["address"], "sent": ok,
+                       "excerpt": hit["excerpt"]})
+    logging.info("[fdny] ALERT %s @ %s - sent=%s", hit["nature"], hit["address"], ok)
+
+
+async def fdny_consumer(stats: Stats, seen: dict) -> None:
+    """Process FDNY Calls pushed by the off-box poller.
+
+    www.broadcastify.com refuses Render egress, so the Calls poll/login runs
+    in the sandbox relay (same as the HLS URL relay) and POSTs new calls to
+    /fdny_calls, which appends them to FDNY_INBOX. The call AUDIO lives on
+    the calls CDN, which Render can reach, so clips are downloaded here.
+    Server-side transcription rides along free with each call; the local
+    whisper is only the fallback. From here on it is the exact same
+    detect -> 30-min dedup -> WAHA -> status-page path as the live feeds.
+    """
+    ids: dict = _load_json(FDNY_IDS, {})
+    offset = 0
+    tmp = SEG_DIR / "fdny_tmp"
+    while True:
+        try:
+            if FDNY_INBOX.exists():
+                size = FDNY_INBOX.stat().st_size
+                if size < offset:
+                    offset = 0
+                if size > offset:
+                    with FDNY_INBOX.open("r") as fh:
+                        fh.seek(offset)
+                        chunk = fh.read()
+                        offset = fh.tell()
+                    for line in chunk.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            call = json.loads(line)
+                        except Exception:  # noqa: BLE001
+                            continue
+                        cid = str(call.get("id") or call.get("filename") or "")
+                        if not cid or cid in ids:
+                            continue
+                        now = time.time()
+                        ids = {k: v for k, v in ids.items() if now - v < 48 * 3600}
+                        ids[cid] = now
+                        try:
+                            FDNY_IDS.write_text(json.dumps(ids))
+                        except Exception:  # noqa: BLE001
+                            pass
+                        await _fdny_handle_call(call, stats, seen, tmp)
+        except Exception as e:  # noqa: BLE001
+            logging.warning("[fdny] consumer error: %s", e)
+        await asyncio.sleep(2)
+
+
 async def waha_watch(stats: Stats) -> None:
     while True:
         stats.waha_status = await alert_waha.check_session()
@@ -214,11 +341,14 @@ async def amain() -> None:
     loop = asyncio.get_running_loop()
     for profile in ingest.FEEDS:
         loop.run_in_executor(None, ingest.supervisor, profile, SEG_DIR, stats)
+    stats.mark_ffmpeg_start("fdny")  # push-driven capture; keeps the card honest
+    stats.event("fdny", "calls ingest armed (sandbox poller -> /fdny_calls)")
     seen = _load_seen()
     logging.info("monitoring feeds: %s", ", ".join(f"{p}={fid}" for p, fid in ingest.FEEDS.items()))
     await start_web(stats)
     await asyncio.gather(
         *(consumer(p, stats, seen) for p in ingest.FEEDS),
+        fdny_consumer(stats, seen),
         keepalive(stats),
         waha_watch(stats),
     )
