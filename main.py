@@ -526,6 +526,12 @@ async def _intersection_point(address: str, cross: str) -> tuple:
     alt = []
     for p in ([street] + parts if "&" not in street else street.split("&", 1)):
         p = p.strip()
+        # OSM uses full street types; the FDNY parser often abbreviates them.
+        p = re.sub(r"\b(St|Ave|Rd|Blvd|Dr|Pl|Ln|Pkwy|Ct|Ter)$",
+                   lambda m: {"st":"Street", "ave":"Avenue", "rd":"Road",
+                              "blvd":"Boulevard", "dr":"Drive", "pl":"Place",
+                              "ln":"Lane", "pkwy":"Parkway", "ct":"Court",
+                              "ter":"Terrace"}[m.group(1).lower()], p, flags=re.I)
         if re.search(rf"\b{_T}\b", p, re.I):
             alt.append([p])
         else:
@@ -1064,7 +1070,8 @@ def _save_recent(rows: list) -> None:
 
 
 async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None,
-                            fresh_ts: float | None = None) -> str:
+                            fresh_ts: float | None = None,
+                            audio_ts: float | None = None, spoken_time: str = "") -> str:
     """User's posting rules (9/28): verified addresses only; Sullivan feed posts
     only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
     Returns 'sent' | 'queued' | 'suppressed'."""
@@ -1370,6 +1377,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     # unconfirmed with no box anchor does not go out ("no such a thing a
     # address doesn't get posted"); BOX ON EVERY FDNY POST - no heard box ->
     # closest box to the address; no box obtainable -> the job does not post.
+    # Verified job survives an unrelated or wrong-borough spoken box.
+    # The closest Brooklyn box is selected below after the bad box dies.
     if not verified and not box_disp:
         logging.info("[%s] suppressed (unconfirmed address, no box anchor): %s",
                      profile, hit["address"])
@@ -1396,6 +1405,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             own_street = _box_road_key(hit["address"])
             row_streets = {_box_road_key(part) for part in
                            re.split(r"\s+at\s+|&", nb_loc or "", flags=re.I)}
+            # A street intersection may match one side of a nearby box.
+            # Keep '(closest)' unless this specific job's street itself
+            # corroborates the box location, not merely an adjacent road.
             box_closest = not (own_street and own_street in row_streets)
             stats.event(profile, f"closest box lookup: Box {nb_digits} - {nb_loc} "
                                  f"for {hit['address']}")
@@ -1408,7 +1420,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             return "suppressed"
     text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony,
                             box=box_disp, box_loc=box_loc, box_mismatch=box_mismatch,
-                            box_closest=box_closest)
+                            box_closest=box_closest,
+                            audio_ts=(audio_ts if audio_ts is not None else fresh_ts)
+                            if clip_name else None, spoken_time=hit.get("spoken_time") or "")
     ogg = None
     if ogg_task is not None:
         try:
@@ -1440,7 +1454,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
 
 def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
                  footer: str | None = None, box: str = "", box_loc: str = "",
-                 box_mismatch: bool = False, box_closest: bool = False) -> str:
+                 box_mismatch: bool = False, box_closest: bool = False,
+                 audio_ts: float | None = None, spoken_time: str = "") -> str:
     """User-picked layout (9/28, option 1): bold caps nature header with fire
     emoji; bold pinned address; plain 'between X & Y' crosses line; time;
     italic source footer at the very bottom. No transcript quote, ever.
@@ -1475,11 +1490,24 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         lines.append(line)
         if box_mismatch:
             lines.append("\N{WARNING SIGN} spoken address not at box location")
-    lines += ["", f"\N{CLOCK FACE ONE OCLOCK} {now}"]
+    try:
+        stamp = float(audio_ts) if audio_ts is not None else 0
+        # Timestamps outside the live job window cannot be trusted as this
+        # dispatch's capture time; never print an invented CAD time.
+        time_line = ("CAD - TIME " + datetime.fromtimestamp(stamp, NY).strftime("%H:%M")
+                     if stamp > 0 and abs(time.time() - stamp) < 2 * 3600
+                     else f"\N{CLOCK FACE ONE OCLOCK} {now}")
+    except (ValueError, TypeError, OverflowError, OSError):
+        time_line = f"\N{CLOCK FACE ONE OCLOCK} {now}"
+    if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", spoken_time):
+        time_line = f"CAD - TIME {spoken_time}"
+    lines += ["", time_line]
     label = footer or SOURCE_LABEL.get(hit["source"], hit["source"])
     lines.append(f"_{label}_")
     # Presentation only: keep the spoken transcript and structured hit unchanged.
-    return re.sub(r"\bpatient\b", "PTT", "\n".join(lines), flags=re.I)
+    text = "\n".join(lines)
+    text = re.sub(r"\bpatient\b", "PTT", text, flags=re.I)
+    return re.sub(r"\bapartment\b", "APT", text, flags=re.I)
 
 
 def _concat_pcm(a: Path, b: Path, out: Path) -> bool:
@@ -1644,9 +1672,12 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
     _save_seen(seen)
     try:
         call_ts = float(call.get("ts") or 0) or None
+        audio_start = float(call.get("audio_start_ts") or 0) or None
     except Exception:  # noqa: BLE001
-        call_ts = None
-    outcome = await verify_and_send("fdny", hit, stats, clip_name, fresh_ts=call_ts)
+        call_ts = audio_start = None
+    outcome = await verify_and_send("fdny", hit, stats, clip_name,
+                                    fresh_ts=call_ts, audio_ts=audio_start)
+
     ok = outcome == "sent"
     stats.mark_alert("fdny", hit["nature"], hit["address"], ok,
                      failed=(outcome == "queued"), outcome=outcome,
