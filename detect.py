@@ -58,6 +58,13 @@ def is_emergency(text: str) -> bool:
 # ---------------------------------------------------------------------------
 # Service areas
 # ---------------------------------------------------------------------------
+BERGEN_AREAS = {
+    "fair lawn": "Fair Lawn", "teaneck": "Teaneck", "englewood": "Englewood",
+    "bergenfield": "Bergenfield", "fort lee": "Fort Lee", "tenafly": "Tenafly",
+    "paramus": "Paramus", "hackensack": "Hackensack", "ridgefield": "Ridgefield",
+    "alpine": "Alpine", "closter": "Closter",
+}
+
 FIVE_TOWNS_AREAS = {
     "woodmere": "Woodmere",
     "woodmare": "Woodmere",  # whisper variant on scratchy audio
@@ -78,15 +85,28 @@ def get_hatzolah_area(text: str) -> str:
     """TSL-ChevraHatzalah mixes NYC divisions AND Sullivan County - trust the
     place names in the dispatch itself to set the area (user rule 9/28)."""
     t = text.lower()
+    # Explicitly excluded Rockland locations cannot inherit Brooklyn's
+    # default area. The final coverage gate suppresses these.
+    if re.search(r"\b(?:rockland|monsey|spring valley|new square|suffern|haverstraw|garnerville|airmont|chestnut ridge)\b", t):
+        return "Rockland"
     for k, v in SULLIVAN_AREAS.items():
         if k in t:
             # "Liberty Avenue" is Brooklyn, not Sullivan's Liberty / Old Liberty Road
             if k == "liberty" and re.search(r"liberty\s+(?:ave|avenue)", t):
                 continue
             return v
+    for k, v in BERGEN_AREAS.items():
+        if re.search(rf"\b(?:in|near|at|village of|town of)\s+{re.escape(k)}\b", t) or \
+                re.search(rf"\b{re.escape(k)}\s*,?\s+(?:nj|new jersey)\b", t):
+            return v
     for k, v in FIVE_TOWNS_AREAS.items():
         if k in t:
             return v
+    for name in ("Staten Island", "Riverdale", "Manhattan", "Brooklyn", "Queens", "Bronx"):
+        pattern = (r"\bmanhattan\b(?!\s+beach)" if name == "Manhattan"
+                   else rf"\b{re.escape(name.lower())}\b")
+        if re.search(pattern, t):
+            return name
     return "Brooklyn"
 
 
@@ -587,10 +607,16 @@ def get_sullivan_area(text: str) -> str:
 
 def _with_area(addr: str, profile: str, text: str) -> str:
     addr = re.sub(r"^(?:and|or)\s+", "", addr.strip(), flags=re.I)
-    area = f"{get_hatzolah_area(text)}, NY" if profile in ("hatzolah", "fdny") else f"{get_sullivan_area(text)}, NY"
-    town = area.split(",")[0].strip().lower()
-    if town and town in addr.lower():
-        return addr if ", NY" in addr else f"{addr}, NY"
+    if profile == "hatzolah":
+        locality = get_hatzolah_area(text)
+        state = "NJ" if locality in BERGEN_AREAS.values() else "NY"
+        area = f"{locality}, {state}"
+    elif profile == "fdny":
+        area = "Brooklyn, NY"
+    else:
+        area = f"{get_sullivan_area(text)}, NY"
+    # The locality word inside a street name is not the locality: "Fair
+    # Lawn Avenue" still needs ", Fair Lawn, NJ". Never infer town from it.
     return f"{addr}, {area}"
 
 
@@ -751,6 +777,8 @@ def get_nature(text: str, profile: str = "") -> str:
         return "Fall"  # tense cleanup only; Hatzalah 'Fall' exclusion depends on it
     v = vt(r"\b(?:bleeding|hemorrhage)\b")
     if v: return v
+    v = vt(r"\b(?:general illness|generally ill|gi distress)\b")
+    if v: return v
     v = vt(r"\bchest pain\b")
     if v: return v
     v = vt(r"\bdrown\w*\b")
@@ -778,6 +806,8 @@ def get_nature(text: str, profile: str = "") -> str:
     v = vt(r"\bunconscious\b")
     if v: return v
     v = vt(r"(?<![\d-])\bcode\b(?!\s*\d)")
+    if v: return v
+    v = vt(r"\b(?:unstable|unsafe)\s+facade\b")
     if v: return v
     v = vt(r"\b(?:water condition|water leak|burst pipe)\b")
     if v: return v
@@ -834,7 +864,9 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\bphone alarm\b")
     if v: return v
-    v = vt(r"\b(?:ems|ambulance|sick person|medical emergency)\b")
+    # EMS/ambulance/BLS are apparatus or response language, not a complaint.
+    # A job without a discernible complaint stays suppressed by verify_and_send.
+    v = vt(r"\b(?:sick person|medical emergency)\b")
     if v: return v
     return ""
 
@@ -991,10 +1023,14 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         return None
     if is_chatter(t):
         return None
-    box_glue_ambiguous = bool(re.search(
+    glued_box = re.search(
         r"\bbox\s+\d{6}(?=\s+(?:[a-z][a-z.'-]*\s+){0,3}"
         r"(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|place|pl|"
-        r"boulevard|blvd|parkway|pkwy)\b)", _norm(text), re.I))
+        r"boulevard|blvd|parkway|pkwy)\b)", _norm(text), re.I)
+    box_glue_ambiguous = bool(glued_box) or bool(re.search(
+        r"\bbox\s+\d{5}(?=\s+(?:[a-z][a-z.'-]*\s+){0,3}"
+        r"(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|place|pl)\b)",
+        _norm(text), re.I))
     # A spoken location intersection outranks the lone typed street that a
     # generic address regex would otherwise extract (Hampton job 9/28).
     spoken_pair = extract_audio_crosses(t) if profile != "fdny" else None
@@ -1003,6 +1039,14 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         addr = _with_area(spoken_pair, profile, t)
     else:
         addr = extract_dispatch_address(t, profile)
+    if profile == "hatzolah" and addr and re.search(r"\b(?:staten island)\b", t, re.I):
+        # The ASR drops/lengthens the final r on Kell Avenue. Correct only
+        # when the dispatch itself says Staten Island and the named spoken
+        # crosses pin Kell (President/Westwood), never on a bare "Keller".
+        if re.search(r"\bKell(?:er)? Avenue\b", t, re.I) and \
+                re.search(r"\bPresident\b", t, re.I) and \
+                re.search(r"\bWestwood\b", t, re.I):
+            addr = "Kell Avenue, Staten Island, NY"
     if not addr and head_over:
         place = head_over.group(1).split(".")[0].strip(" ,")
         if len(place) >= 3:
@@ -1052,6 +1096,10 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         logging.info("suppressed (dangling intersection address): %s", addr)
         return None
     cross = extract_audio_crosses(t)
+    if profile == "hatzolah" and addr == "Kell Avenue, Staten Island, NY" and \
+            re.search(r"\bPresident\b", t, re.I) and \
+            re.search(r"\bWestwood\b", t, re.I):
+        cross = "President Street & Westwood Avenue"
     if cross:
         # the incident address is never its own cross street ('218 Union
         # Street & Henry Street' posted 6:26 AM 9/28 - dispatch gave the
@@ -1062,7 +1110,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         cross = " & ".join(parts) if parts else None
     nature = get_nature(t, profile)
     apt = extract_apartment(t)
-    if apt and nature:
+    if apt and nature and profile == "fdny":
         nature = f"{nature}, {apt}"
     fl = re.search(r"\bthe\s+((?:first|second|third|fourth|fifth|sixth|"
                    r"seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th))\s+floor)\b", t)
@@ -1071,6 +1119,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     return {
         "source": source,
         "nature": nature,
+        "apartment": apt if profile != "fdny" else "",
         "address": addr,
         "excerpt": t[:280],
         # box spoken anywhere in the chunk (the excerpt above truncates at
@@ -1078,6 +1127,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         # to the closest-box lookup)
         "box_heard": detect_box(t),
         "box_glue_ambiguous": box_glue_ambiguous,
+        "raw_box_run": re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I).group(1)
+                       if re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I) else "",
         "priority": is_priority(t),
         "cross": cross,
-    }
+            }
