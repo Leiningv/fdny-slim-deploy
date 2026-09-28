@@ -89,7 +89,7 @@ class Stats:
                                    "file": filename, "transcript": transcript[:200]})
 
     def mark_alert(self, profile: str, nature: str, address: str, ok: bool,
-                   failed: bool = True) -> None:
+                   failed: bool = True, outcome: str = "") -> None:
         with self._lock:
             f = self.feed(profile)
             f["last_alert_at"] = time.time()
@@ -98,10 +98,12 @@ class Stats:
                 self.alerts_sent += 1
             elif failed:
                 self.alerts_failed += 1
+            out = outcome or ("sent" if ok else ("failed" if failed else "suppressed"))
             self.alerts.appendleft({"t": time.time(), "feed": profile,
-                                    "nature": nature, "address": address, "sent": ok})
+                                    "nature": nature, "address": address, "sent": ok,
+                                    "outcome": out})
             self.events.appendleft({"t": time.time(), "feed": profile,
-                                    "msg": f"ALERT sent={ok}: {nature} @ {address}"})
+                                    "msg": f"ALERT {out}: {nature} @ {address}"})
 
     @staticmethod
     def _age(ts):
@@ -136,7 +138,8 @@ class Stats:
                 "feeds": feeds,
                 "alert_log": [
                     {"age_sec": self._age(a["t"]), "feed": a["feed"], "nature": a["nature"],
-                     "address": a["address"], "sent": a["sent"]}
+                     "address": a["address"], "sent": a["sent"],
+                     "outcome": a.get("outcome") or ("sent" if a["sent"] else "failed")}
                     for a in list(self.alerts)[:30]
                 ],
                 "clips": [
@@ -181,7 +184,7 @@ def _html(snap: dict) -> str:
         alert_rows = "".join(
             f"<tr><td>{_fmt_age(a['age_sec'])}</td><td>{esc(a['feed'])}</td>"
             f"<td>{esc(a['nature'])}</td><td>{esc(a['address'])}</td>"
-            f"<td>{'sent' if a['sent'] else 'FAILED'}</td></tr>"
+            f"<td>{esc(a.get('outcome') or ('sent' if a['sent'] else 'FAILED'))}</td></tr>"
             for a in snap["alert_log"])
     else:
         alert_rows = '<tr><td colspan="5" class="dim">no dispatch alerts yet this run</td></tr>'
@@ -223,7 +226,9 @@ status: <span class="ok">LIVE</span> &middot; uptime {int(snap['uptime_sec'] // 
 &middot; commit {esc(snap['git_commit'] or '?')}
 &middot; WAHA session: <b>{esc(snap['waha_session'])}</b>
 &middot; alerts sent {snap['alerts_sent']} (failed {snap['alerts_failed']})
-<br>feeds: Zello TSL-ChevraHatzalah (24/7) &middot; Zello Sullivan County (standby) &middot; FDNY Brooklyn dispatch (Calls)
+<br>feeds: Zello TSL-ChevraHatzalah (24/7) &middot; Zello Sullivan County (24/7, dedicated account) &middot; FDNY Brooklyn dispatch (Calls)
+<br>posting: option-1 layout &middot; box numbers verified vs fdnewyork.com &middot; map-canonical street spelling
+&middot; freshness gate (live &le;5m, Calls &le;10m) &middot; same-second text+voice note &middot; ops log &rarr; FD SYSTEM UPDATES
 <br>transcription: <b>{engine}</b> &middot; alerts queued (WAHA down): {queued}
 &middot; auto-refresh 60s
 </div>

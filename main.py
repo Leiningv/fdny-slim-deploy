@@ -760,7 +760,8 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
             outcome = await verify_and_send(profile, hit, stats, clip_name,
                                             fresh_ts=wav.stat().st_mtime)
             ok = outcome == "sent"
-            stats.mark_alert(profile, hit["nature"], hit["address"], ok, failed=(outcome == "queued"))
+            stats.mark_alert(profile, hit["nature"], hit["address"], ok,
+                             failed=(outcome == "queued"), outcome=outcome)
             _append_alert_log({"t": now, "feed": profile, "nature": hit["nature"],
                                "address": hit["address"], "sent": ok,
                                "excerpt": hit["excerpt"]})
@@ -841,7 +842,8 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
         call_ts = None
     outcome = await verify_and_send("fdny", hit, stats, clip_name, fresh_ts=call_ts)
     ok = outcome == "sent"
-    stats.mark_alert("fdny", hit["nature"], hit["address"], ok, failed=(outcome == "queued"))
+    stats.mark_alert("fdny", hit["nature"], hit["address"], ok,
+                     failed=(outcome == "queued"), outcome=outcome)
     _append_alert_log({"t": now, "feed": "fdny", "nature": hit["nature"],
                        "address": hit["address"], "sent": ok,
                        "excerpt": hit["excerpt"]})
