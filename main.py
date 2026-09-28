@@ -274,7 +274,8 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                 # street token with the query, else it's not this address
                 core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", q.split(",")[0]).strip().lower()
                 qtoks = {t for t in re.split(r"[\s,.&'-]+", core)
-                         if len(t) >= 4 and t not in _ADDR_GENERIC and not t.isdigit()}
+                         if ((len(t) >= 4) or (len(t) == 1 and t.isalpha()))
+                         and t not in _ADDR_GENERIC and not t.isdigit()}
                 # Planning Labs normalizes ordinals: '64th St' -> '64 STREET' -
                 # the token '64th' never matches; add the digit form ('730 64th
                 # St' was falsely 'not confirmed' 9/28)
@@ -282,7 +283,16 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                           for t in list(qtoks)
                           if re.fullmatch(r"\d+(?:st|nd|rd|th)", t)}
                 ltok = label.lower()
-                if qtoks and not any(t in ltok for t in qtoks):
+                if not qtoks:
+                    # no rare token at all ('The Street' -> 'the street'):
+                    # type-only chatter verifies against ANY fuzzy hit
+                    # ('1 THE ST OF CULTURE' posted 6:25 AM 9/28). Short
+                    # generic cores are unverifiable; longer ones must match
+                    # the label verbatim.
+                    if len(core.split()) <= 2 or core not in ltok:
+                        logging.info("geocode: rejected generic-street fallback: %s -> %s", q, label)
+                        continue
+                elif not any(t in ltok for t in qtoks):
                     logging.info("geocode: rejected wrong-street fallback: %s -> %s", q, label)
                     continue
                 return True, False, label, lat, lon, (label.split(",")[1].strip() if "," in label else "")
@@ -302,11 +312,17 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                 continue
             core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", q.split(",")[0]).strip().lower()
             qtoks = {t for t in re.split(r"[\s,.&'-]+", core)
-                     if len(t) >= 4 and t not in _ADDR_GENERIC and not t.isdigit()}
+                     if ((len(t) >= 4) or (len(t) == 1 and t.isalpha()))
+                     and t not in _ADDR_GENERIC and not t.isdigit()}
             qtoks |= {re.sub(r"(\d+)(?:st|nd|rd|th)$", r"\1", t)
                       for t in list(qtoks)
                       if re.fullmatch(r"\d+(?:st|nd|rd|th)", t)}
-            if qtoks and not any(t in disp.lower() for t in qtoks):
+            if not qtoks:
+                if len(core.split()) <= 2 or core not in disp.lower():
+                    logging.info("geocode: rejected generic-street hit: %s -> %s", q, disp)
+                    await asyncio.sleep(1.1)
+                    continue
+            elif not any(t in disp.lower() for t in qtoks):
                 logging.info("geocode: rejected wrong-street hit: %s -> %s", q, disp)
                 await asyncio.sleep(1.1)
                 continue
