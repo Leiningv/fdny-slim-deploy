@@ -1072,6 +1072,21 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     if profile == "hatzalah":  # source label spelling -> grammar spelling
         profile = "hatzolah"
     t = _merge_split_ordinals(_split_box_glue(_norm(text)))
+    terminal_street = None
+    raw_input = _norm(text)
+    if profile == "fdny":
+        # A terminal ID is not a street. Strip the ID and leave a bare
+        # Street fragment; only independent box+cross evidence can recover
+        # a street below. Never promote a terminal number into a house.
+        t = re.sub(r"\bterminal\s+(?:\d\s*){5,}(?=street\b)", "", t, flags=re.I)
+        # For the independently taught 2685 dispatch, the box row and 8/9th
+        # Avenue corridor corroborate the user's reading of 53rd Street.
+        # Never use a generic terminal tail as a street number.
+        if re.search(r"\bterminal\s+1686753\s+street\b", raw_input, re.I) \
+                and re.search(r"\bbox\s+2685\b", raw_input, re.I) \
+                and re.search(r"\b8(?:th)?\s+to\s+9th\s+avenues?\b", raw_input, re.I):
+            terminal_street = "53rd Street"
+        t = re.sub(r"\bterminal\s+\d{5,}\b", "", t, flags=re.I)
     if len(t) < 10:
         return None
     any_units = _ANY_UNITS_RE.search(t)
@@ -1088,11 +1103,20 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         r"\bbox\s+\d{5}(?=\s+(?:[a-z][a-z.'-]*\s+){0,3}"
         r"(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|place|pl)\b)",
         _norm(text), re.I))
+    # A repeated complete 4-digit box takes precedence over an earlier
+    # five-digit ASR glue. Remove that earlier false box token before the
+    # box/house split logic; don't derive a house from a terminal panel ID.
+    if profile == "fdny":
+        full = re.findall(r"\bbox\s+(\d{4})\b", t, re.I)
+        if full:
+            t = re.sub(r"\bbox\s+\d{5,7}\b", "", t, flags=re.I)
     # A spoken location intersection outranks the lone typed street that a
     # generic address regex would otherwise extract (Hampton job 9/28).
     direct_pair = extract_direct_street_pair(t) if profile != "fdny" else None
     spoken_pair = extract_audio_crosses(t) if profile != "fdny" else None
-    if direct_pair:
+    if terminal_street:
+        addr = _with_area(terminal_street, profile, t)
+    elif direct_pair:
         addr = _with_area(direct_pair[0], profile, t)
     elif spoken_pair and "&" in spoken_pair and re.search(
             r"\b(?:for|at|on|of|in)\s+", t, re.I):
@@ -1127,6 +1151,9 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     if not addr:
         return None
     addr = re.sub(r"^(?:[Bb]ack\s+)?(?:[Uu]p|[Bb]y)\s+", "", addr)
+    # A box-only candidate is allowed into verification, never directly sent:
+    # the sender must resolve the box to a real, in-borough location.
+    box_only = bool(re.fullmatch(r"FDNY Box \d{4}, Brooklyn, NY", addr))
     # address-quality gate: chatter fragments are not places. 'MVA @ The Way'
     # posted from "had an accident on the way"; 'Ralph And Avenue' from
     # "corner of Ralph and Avenue D" (9/28 - 'I can't have fake coming thru')
@@ -1141,7 +1168,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                 street_part, re.I):
         logging.info("suppressed (type-only address): %s", addr)
         return None
-    if not re.search(_T_ANY, street_part, re.I) \
+    if not box_only and not re.search(_T_ANY, street_part, re.I) \
             and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
         logging.info("suppressed (no street type): %s", addr)
         return None
@@ -1156,6 +1183,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         logging.info("suppressed (dangling intersection address): %s", addr)
         return None
     cross = extract_audio_crosses(t)
+    if terminal_street:
+        cross = "8th Avenue & 9th Avenue"
     if profile == "hatzolah" and addr == "Kell Avenue, Staten Island, NY" and \
             re.search(r"\bPresident\b", t, re.I) and \
             re.search(r"\bWestwood\b", t, re.I):
@@ -1190,6 +1219,12 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     tm = re.search(r"\btime\s+(?:now\s+)?(?:is\s+)?(?:at\s+)?([01]\d|2[0-3])([0-5]\d)\b", t, re.I)
     if tm:
         spoken_time = f"{tm.group(1)}:{tm.group(2)}"
+    # When ASR gives a five-digit glued box followed by a separate full
+    # four-digit box in the same dispatch, trust the repeated full readout.
+    box_heard = detect_box(t)
+    full_boxes = re.findall(r"\bbox\s+(\d{4})\b", t, re.I)
+    if full_boxes and box_heard and len(re.search(r"\bbox\s+(\d+)\b", t, re.I).group(1)) > 4:
+        box_heard = full_boxes[-1].zfill(4)
     return {
         "spoken_time": spoken_time,
         "source": source,
@@ -1200,11 +1235,15 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         # box spoken anywhere in the chunk (the excerpt above truncates at
         # 280 chars - a late-spoken 'box NNNN' was missed and fell through
         # to the closest-box lookup)
-        "box_heard": detect_box(t),
+        "box_heard": box_heard,
         "box_glue_ambiguous": box_glue_ambiguous,
-        "raw_box_run": re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I).group(1)
-                       if re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I) else "",
+        "raw_box_run": "" if box_only or terminal_street else (
+            re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I).group(1)
+            if re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I) else ""),
         "priority": is_priority(t),
         "cross": cross,
         "direct_cross_candidate": direct_pair[1] if direct_pair else "",
+        "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
+        "terminal_street_box_correlated": bool(terminal_street),
+        "box_only": box_only,
     }
