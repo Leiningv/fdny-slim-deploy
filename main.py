@@ -341,7 +341,10 @@ async def amain() -> None:
         logging.warning("WAHA not fully configured - alerts will fail until WAHA_URL/API_KEY/CHAT_ID are set")
 
     loop = asyncio.get_running_loop()
-    for profile in ingest.FEEDS:
+    hls_profiles = [] if os.environ.get("HLS_DISABLED", "1") == "1" else list(ingest.FEEDS)
+    # legacy broadcastify HLS is 403-blocked from Render egress and replaced by
+    # the Zello listener; set HLS_DISABLED=0 to re-enable
+    for profile in hls_profiles:
         loop.run_in_executor(None, ingest.supervisor, profile, SEG_DIR, stats)
     for profile in zello_ingest.CHANNELS:
         loop.run_in_executor(None, zello_ingest.supervisor, profile, SEG_DIR, stats)
@@ -351,7 +354,7 @@ async def amain() -> None:
     logging.info("monitoring feeds: %s", ", ".join(f"{p}={fid}" for p, fid in ingest.FEEDS.items()))
     await start_web(stats)
     await asyncio.gather(
-        *(consumer(p, stats, seen) for p in ingest.FEEDS),
+        *(consumer(p, stats, seen) for p in hls_profiles),
         *(consumer(p, stats, seen) for p in zello_ingest.CHANNELS),
         fdny_consumer(stats, seen),
         keepalive(stats),

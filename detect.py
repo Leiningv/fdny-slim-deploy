@@ -59,6 +59,8 @@ def is_emergency(text: str) -> bool:
 # ---------------------------------------------------------------------------
 FIVE_TOWNS_AREAS = {
     "woodmere": "Woodmere",
+    "woodmare": "Woodmere",  # whisper variant on scratchy audio
+    "five-town": "Five Towns",
     "lawrence": "Lawrence",
     "cedarhurst": "Cedarhurst",
     "inwood": "Inwood",
@@ -81,6 +83,10 @@ def get_hatzolah_area(text: str) -> str:
 
 
 SULLIVAN_AREAS = {
+    "windsor hills estates": "Windsor Hills Estates",
+    "windsor hills": "Windsor Hills Estates",
+    "windy real estate": "Windsor Hills Estates",  # whisper variant, verified 9/28
+    "petaluga": "Monticello",  # Petaluga Drive is in Monticello
     "south fallsburg": "S Fallsburg",
     "woodridge": "Woodridge",
     "woodbourne": "Woodbourne",
@@ -358,6 +364,14 @@ def _with_area(addr: str, profile: str, text: str) -> str:
     return f"{addr}, {area}"
 
 
+_FIRE_NUM_DISPATCH_RE = re.compile(
+    r"\b(\d{3,4})\s+on\s+([A-Za-z .'-]{3,40}?(?:Road|Rd|Street|St|Avenue|Ave|Lane|Ln|"
+    r"Drive|Dr|Court|Ct|Place|Pl|Boulevard|Blvd|Route|Highway|Hwy|Turnpike|Tpke))\b", re.I)
+
+# "F-37, head over to Windsor Hills Estates" - fire dispatch to a named place
+_HEAD_OVER_RE = re.compile(r"\bhead over to\s+(.{3,60})", re.I)
+
+
 _LONE_STREET_RE = re.compile(
     r"\b((?:[A-Za-z0-9.'-]+\s+){1,2}(?:Ave(?:nue)?|St(?:reet)?|Rd|Road|Blvd|Boulevard|"
     r"Dr|Drive|Ln|Lane|Ct|Court|Pl(?:ace)?|Pkwy|Parkway|Ter(?:race)?|Way|"
@@ -379,6 +393,9 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
     house = extract_house_address(text)
     if house:
         return _with_area(house, profile, text)
+    num = _FIRE_NUM_DISPATCH_RE.search(text)
+    if num:
+        return _with_area(f"{num.group(1)} {num.group(2).strip().title()}", profile, text)
     lone = _LONE_STREET_RE.search(text)
     if lone:
         street = re.sub(r"^(?:on|the|at|in|to|of|for)\s+", "", lone.group(1).strip(), flags=re.I)
@@ -453,8 +470,16 @@ _CHATTER_RE = re.compile(
 # Hatzalah dispatches often open "Any units in <place> for <nature>" - no
 # formal address, but it IS a job. Matches the whole tail; address resolution
 # still prefers a real street mention inside it.
+_CROSS_STOPWORDS = {
+    "for", "the", "and", "with", "units", "year", "old", "male", "female",
+    "elderly", "any", "needed", "responding", "respond", "have", "has",
+}
+
+
 _ANY_UNITS_RE = re.compile(
-    r"\bany\s+units?\s+(?:needed\s+)?(?:in|to|at)\s+(.{2,120})", re.I)
+    r"\bany\s+units?\s+(?:needed\s+)?(?:in|to|at)\s+(.{2,120})"
+    r"|\bany\s+innocent\s+(.{2,120})"
+    r"|\bbanana\s+(.{2,120})", re.I)  # whisper slur of "any units in a" on bad audio
 
 
 def is_chatter(text: str) -> bool:
@@ -517,14 +542,23 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     if len(t) < 10:
         return None
     any_units = _ANY_UNITS_RE.search(t)
-    if not is_emergency(t) and not any_units:
+    head_over = _HEAD_OVER_RE.search(t)
+    if not is_emergency(t) and not any_units and not head_over:
         return None
     if is_chatter(t):
         return None
     addr = extract_dispatch_address(t, profile)
-    if not addr and any_units:
-        place = re.split(r"\s+for\s+", any_units.group(1), maxsplit=1)[0].strip(" .,")
+    if not addr and head_over:
+        place = head_over.group(1).split(".")[0].strip(" ,")
         if len(place) >= 3:
+            addr = _with_area(place.title(), profile, t)
+    if not addr and any_units:
+        tail = next(g for g in any_units.groups() if g)
+        place = re.split(r"\s+for\s+", tail, maxsplit=1)[0].strip(" .,")
+        named = re.search(r"\b([a-z]{3,15})\s+and\s+([a-z]{3,15})\b", tail.lower())
+        if named and not any(w in _CROSS_STOPWORDS for w in named.groups()):
+            addr = _with_area(f"{named.group(1).title()} & {named.group(2).title()}", profile, t)
+        elif len(place) >= 3:
             addr = _with_area(place.title(), profile, t)
     if not addr and profile == "fdny":
         low = t.lower()

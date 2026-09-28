@@ -273,11 +273,20 @@ def run_session(profile: str, channel: str, seg_dir: Path, stats) -> None:
         stats.mark_ffmpeg_exit(profile)
 
 
+# Zello allows ONE active session per account: two channels on one account
+# kick each other. Until a second account exists, PASSIVE channels back off
+# hard so the primary channel holds the account 24/7. Remove a profile from
+# ZELLO_PASSIVE once it has its own credentials.
+PASSIVE = {p.strip() for p in os.environ.get("ZELLO_PASSIVE", "zello-sullivan").split(",") if p.strip()}
+PASSIVE_BACKOFF = int(os.environ.get("ZELLO_PASSIVE_BACKOFF", "300"))
+
+
 def supervisor(profile: str, seg_dir: Path, stats) -> None:
     """Keep one Zello listener session running forever (blocking)."""
     seg_dir.mkdir(parents=True, exist_ok=True)
     channel = CHANNELS[profile]
-    backoff = 5
+    passive = profile in PASSIVE
+    backoff = PASSIVE_BACKOFF if passive else 5
     if not configured():
         logging.warning("[%s] Zello env not configured - listener idle", profile)
         stats.event(profile, "zello env missing (ZELLO_USER/PASS/ISSUER/PRIVATE_KEY)")
@@ -291,4 +300,5 @@ def supervisor(profile: str, seg_dir: Path, stats) -> None:
             stats.event(profile, f"zello reconnect: {str(e)[:200]}")
         logging.warning("[%s] zello reconnecting in %ss", profile, backoff)
         time.sleep(backoff)
-        backoff = min(backoff * 2, 120)
+        if not passive:
+            backoff = min(backoff * 2, 120)
