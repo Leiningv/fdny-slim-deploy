@@ -5,7 +5,8 @@ Pattern mirrors the original waha_client.py:
     header X-Api-Key: <key>   (falls back to X-API-KEY)
     json: {"session": ..., "chatId": ..., "text": ...}
 
-Env: WAHA_URL, WAHA_API_KEY, WAHA_CHAT_ID, WAHA_SESSION (default "default").
+Env: WAHA_URL, WAHA_API_KEY, WAHA_CHAT_ID, WAHA_SESSION (default "default"),
+WAHA_OPS_CHAT_ID (ops back-channel group; optional).
 """
 from __future__ import annotations
 
@@ -96,6 +97,50 @@ async def send_file(caption: str, file_url: str, filename: str, mimetype: str = 
             last_err = str(e)
     logging.error("WAHA sendFile failed: %s", last_err)
     return False
+
+
+def _ops_chat() -> str:
+    return os.environ.get("WAHA_OPS_CHAT_ID", "").strip()
+
+
+async def send_voice(file_url: str, chat_id: str | None = None) -> bool:
+    """Send an OGG/OPUS clip as a WhatsApp voice-message bubble (ptt)."""
+    if not configured():
+        return False
+    url = f"{_base()}/api/sendVoice"
+    payload = {
+        "session": _session(),
+        "chatId": chat_id or _chat(),
+        "file": {"mimetype": "audio/ogg; codecs=opus", "url": file_url},
+    }
+    last_err = ""
+    for hdr in _API_KEY_HEADERS:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    url, json=payload,
+                    headers={"Content-Type": "application/json", hdr: _key()},
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as r:
+                    body = (await r.text())[:200]
+                    if r.status in (200, 201):
+                        return True
+                    last_err = f"HTTP {r.status}: {body}"
+                    if r.status not in (401, 403):
+                        break
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e)
+    logging.error("WAHA sendVoice failed: %s", last_err)
+    return False
+
+
+async def send_ops(text: str) -> bool:
+    """Post one line to the ops back-channel group (FD SYSTEM UPDATES)."""
+    chat = _ops_chat()
+    if not chat:
+        logging.info("ops (no ops chat configured): %s", text)
+        return False
+    return await send_text(text, chat_id=chat)
 
 
 async def check_session() -> str:

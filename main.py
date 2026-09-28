@@ -28,6 +28,46 @@ import transcribe
 import zello_ingest
 from status import ARCHIVE_DIR, ARCHIVE_KEEP, Stats, keepalive, start_web
 
+_OPS_Q: list[str] = []
+_OPS_TASKS: list = []
+
+
+def ops_log(line: str) -> None:
+    logging.info("ops: %s", line)
+    _OPS_Q.append(line)
+
+
+async def _ops_flusher() -> None:
+    while True:
+        await asyncio.sleep(300)
+        if not _OPS_Q:
+            continue
+        lines, _OPS_Q[:] = _OPS_Q[:12], _OPS_Q[12:]
+        try:
+            await alert_waha.send_ops("🛠 " + "\n".join(lines))
+        except Exception as e:  # noqa: BLE001
+            logging.warning("ops flush failed: %s", e)
+
+
+def _ensure_ogg(clip_name: str):
+    src = ARCHIVE_DIR / clip_name
+    ogg = src.with_suffix(".ogg")
+    if ogg.exists():
+        return ogg.name
+    try:
+        try:
+            import imageio_ffmpeg
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:  # noqa: BLE001
+            ff = "ffmpeg"
+        import subprocess
+        subprocess.run([ff, "-y", "-v", "error", "-i", str(src), "-c:a", "libopus", "-b:a", "32k", str(ogg)],
+                       check=True, timeout=60)
+        return ogg.name
+    except Exception as e:  # noqa: BLE001
+        logging.warning("ogg convert failed for %s: %s", clip_name, e)
+        return None
+
 NY = ZoneInfo("America/New_York")
 DEDUP_SEC = int(os.environ.get("DEDUP_SECONDS", str(30 * 60)))
 SEG_DIR = Path(os.environ.get("SEG_DIR", "./segments"))
@@ -165,23 +205,37 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     if re.match(r"^FDNY Box \d+", hit["address"]):
         logging.info("[%s] suppressed (bare box, no street address): %s", profile, hit["address"])
         stats.event(profile, f"suppressed (bare box): {hit['address']}")
+        ops_log(f"suppressed (bare box): {hit['address']}")
         return "suppressed"
     if not (hit.get("nature") or "").strip():
         logging.info("[%s] suppressed (no discernible nature): %s", profile, hit["address"])
         stats.event(profile, f"suppressed (no nature): {hit['address']}")
+        ops_log(f"suppressed (no nature): {hit['address']}")
         return "suppressed"
     if GEOCODE_VERIFY:
         verified, in_sullivan = await geocode_verify(hit["address"], profile)
         if profile == "sullivan" and verified and not in_sullivan:
             logging.info("[%s] suppressed (verified outside Sullivan Co): %s", profile, hit["address"])
             stats.event(profile, f"suppressed (outside Sullivan Co): {hit['nature']} @ {hit['address']}")
+            ops_log(f"suppressed (outside Sullivan Co): {hit['nature']} @ {hit['address']}")
             return "suppressed"
         if not verified:
             text_out = text_out.replace(hit["address"], hit["address"] + " (not confirmed)", 1)
             stats.event(profile, f"unconfirmed address: {hit['address']}")
-    # Audio paused per user rule 9:28 - voice-note wiring pending; posts are text-only.
     ok = await alert_waha.send_text(text_out)
-    return "sent" if ok else "queued"
+    if not ok:
+        ops_log(f"ALERT POST FAILED: {hit['nature']} @ {hit['address']}")
+        return "queued"
+    if clip_name:
+        ogg = await asyncio.to_thread(_ensure_ogg, clip_name)
+        if ogg:
+            base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
+            vok = await alert_waha.send_voice(f"{base}/audio/{ogg}")
+            if not vok:
+                ops_log(f"voice-note send failed: {hit['nature']} @ {hit['address']}")
+        else:
+            ops_log(f"voice-note convert failed: {hit['nature']} @ {hit['address']}")
+    return "sent"
 
 
 def format_alert(hit: dict) -> str:
@@ -442,6 +496,7 @@ async def amain() -> None:
     seen = _load_seen()
     logging.info("monitoring feeds: %s", ", ".join(f"{p}={fid}" for p, fid in ingest.FEEDS.items()))
     await start_web(stats)
+    _OPS_TASKS.append(asyncio.create_task(_ops_flusher()))
     await asyncio.gather(
         *(consumer(p, stats, seen) for p in hls_profiles),
         *(consumer(p, stats, seen) for p in zello_ingest.CHANNELS),

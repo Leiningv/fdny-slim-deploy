@@ -259,7 +259,8 @@ def make_app(stats: Stats) -> web.Application:
         path = ARCHIVE_DIR / name
         if not path.exists():
             raise web.HTTPNotFound()
-        return web.FileResponse(path, headers={"Content-Type": "audio/wav"})
+        ct = "audio/ogg" if path.suffix == ".ogg" else "audio/wav"
+        return web.FileResponse(path, headers={"Content-Type": ct})
 
     app = web.Application()
     async def diag(req: web.Request) -> web.Response:
