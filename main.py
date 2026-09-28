@@ -1196,7 +1196,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         ops_log(f"suppressed ({hit.get('nature')} excluded): {hit['address']}")
         return "suppressed"
     box_task = None
-    if not profile.lower().startswith(("sullivan", "zello-sullivan")):
+    if profile == "fdny":
         heard = hit.get("box_heard") or _heard_box(hit.get("excerpt") or "")
         if heard:
             box_task = asyncio.create_task(_box_lookup(heard))
@@ -1217,7 +1217,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             hit.get("excerpt") or "", re.I):
         stats.event(profile, f"suppressed (Rockland dispatch): {hit['address']}")
         return "suppressed"
-    if hit.get("terminal_street_box_correlated"):
+    if profile == "fdny" and hit.get("terminal_street_box_correlated"):
         # A user's specific reading of this garbled dispatch is still gated
         # by independent map and NYC box corroboration before any post.
         box_num = hit.get("box_heard") or ""
@@ -1227,7 +1227,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if not exact_row:
             stats.event(profile, "suppressed (terminal street box mismatch)")
             return "suppressed"
-    if hit.get("box_only"):
+    if profile == "fdny" and hit.get("box_only"):
         # A terminal-ID dispatch with no trustworthy spoken street may use
         # the verified Brooklyn box location as its address anchor. Never
         # invent a house number or let a box from another borough through.
@@ -1549,7 +1549,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     # an uncorroborated guess or a mismatch warning as though the guessed box
     # were spoken. A box location sharing the verified address/cross is the
     # independent anchor for the chosen split.
-    if hit.get("box_glue_ambiguous") and (not verified or not box_disp or box_mismatch):
+    if profile == "fdny" and hit.get("box_glue_ambiguous") and (not verified or not box_disp or box_mismatch):
         stats.event(profile, f"suppressed (ambiguous box/house split): {hit['address']}")
         ops_log(f"suppressed (ambiguous box/house split): {hit['address']}")
         return "suppressed"
@@ -1559,7 +1559,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     # closest box to the address; no box obtainable -> the job does not post.
     # Verified job survives an unrelated or wrong-borough spoken box.
     # The closest Brooklyn box is selected below after the bad box dies.
-    if not verified and not box_disp:
+    if not verified and (profile != "fdny" or not box_disp):
         reason = "unconfirmed, no box" if profile == "fdny" else "no verified location"
         logging.info("[%s] suppressed (%s): %s", profile, reason, hit["address"])
         stats.event(profile, f"suppressed ({reason}): {hit['nature']} @ {hit['address']}")
@@ -1608,8 +1608,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                   hit.get("service_road_spoken") else "Grand Central Parkway")
         hit["address"] = f"North Shore Towers, {access}, Queens, NY"
     text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony,
-                            box=box_disp, box_loc=box_loc, box_mismatch=box_mismatch,
-                            box_closest=box_closest,
+                            box=box_disp if profile == "fdny" else "",
+                            box_loc=box_loc if profile == "fdny" else "",
+                            box_mismatch=box_mismatch if profile == "fdny" else False,
+                            box_closest=box_closest if profile == "fdny" else False,
                             audio_ts=(audio_ts if audio_ts is not None else fresh_ts)
                             if clip_name else None, spoken_time=hit.get("spoken_time") or "")
     verified_at = time.monotonic()
@@ -1709,6 +1711,15 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         time_line = f"CAD - TIME {spoken_time}"
     lines += ["", time_line]
     label = footer or SOURCE_LABEL.get(hit["source"], hit["source"])
+    if (hit.get("source") or "").removeprefix("zello-") == "sullivan":
+        # The same pager carries fire and EMS jobs. Empress/EMS/ALS/BLS
+        # dispatches are EMS; otherwise use the spoken nature, without
+        # guessing from an address or an ordinary unit number.
+        heard = (hit.get("excerpt") or "").lower()
+        ems_dispatch = bool(re.search(r"\b(?:dispatch\s+to\s+empress|for\s+empress|ems\s+(?:call|response|dispatch)|als\s+response|bls\s+response)\b", heard))
+        label = "EMS" if medical or ems_dispatch else "Sullivan FD"
+        if footer:
+            label += f" · {footer}"
     lines.append(f"_{label}_")
     # Presentation only: keep the spoken transcript and structured hit unchanged.
     text = "\n".join(lines)
