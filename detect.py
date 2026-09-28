@@ -74,8 +74,15 @@ FIVE_TOWNS_AREAS = {
 
 
 def get_hatzolah_area(text: str) -> str:
-    """TSL-ChevraHatzolah covers Brooklyn AND the Five Towns."""
+    """TSL-ChevraHatzalah mixes NYC divisions AND Sullivan County - trust the
+    place names in the dispatch itself to set the area (user rule 9/28)."""
     t = text.lower()
+    for k, v in SULLIVAN_AREAS.items():
+        if k in t:
+            # "Liberty Avenue" is Brooklyn, not Sullivan's Liberty / Old Liberty Road
+            if k == "liberty" and re.search(r"liberty\s+(?:ave|avenue)", t):
+                continue
+            return v
     for k, v in FIVE_TOWNS_AREAS.items():
         if k in t:
             return v
@@ -169,9 +176,13 @@ _ORD_WORD_RE = "|".join(_ORDINAL_WORDS)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+_MISHEAR_RE = re.compile(r"\bone floor\b(?=\s+(?:between|and)\s+\d)", re.I)
+
+
 def _norm(text: str) -> str:
     t = re.sub(r"\s+", " ", (text or "")).strip()
-    return t
+    # "one floor" is a verified mishearing of "14" in Boro Park avenue shorthand (9/28)
+    return _MISHEAR_RE.sub("14", t)
 
 
 def _ordinal_street_num(n: int) -> str:
@@ -265,6 +276,13 @@ def extract_cross_street(text: str) -> str | None:
         p2 = _format_cross_street_part(n2, m.group("t2"))
         if p1 and p2:
             return f"{p1} & {p2}"
+    # Boro Park bare-number shorthand: "14 between 50 and 51" -> 14th Ave between 50th & 51st St
+    m = re.search(r"(?<![\d-])(\d{1,2})\s+between\s+(\d{1,3})\s+and\s+(\d{1,3})(?!\d)", t)
+    if m:
+        a, b, c = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= a <= 25 and 1 <= b <= 199 and c == b + 1:
+            return (f"{_ordinal_street_num(a)} Ave between "
+                    f"{_ordinal_street_num(b)} & {_ordinal_street_num(c)} St")
     # bare two-number Brooklyn grid: "units for 14 and 46"
     m = re.search(r"(?<![\d-])(\d{1,2})\s+and\s+(\d{1,2})(?!\d)", t)
     if m:
