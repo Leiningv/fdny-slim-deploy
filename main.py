@@ -490,6 +490,13 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         stats.event(profile, f"suppressed (Fall excluded): {hit['address']}")
         ops_log(f"suppressed (Fall excluded): {hit['address']}")
         return "suppressed"
+    ogg_task = None
+    if clip_name:
+        # Convert the voice note concurrently with geocode/canonicalization so
+        # text and audio can post back-to-back (user rule 9/28: "Job has to be
+        # posted same second as audio"). Conversion is ~1-2s, verification is
+        # usually slower, so the text post is not delayed.
+        ogg_task = asyncio.create_task(asyncio.to_thread(_ensure_ogg, clip_name))
     verified = True
     verified_label = ""
     lat = lon = None
@@ -551,16 +558,17 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         except Exception as e:  # noqa: BLE001
             logging.warning("colony match failed: %s", e)
     text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony)
+    ogg = None
+    if ogg_task is not None:
+        try:
+            ogg = await ogg_task
+        except Exception:  # noqa: BLE001
+            ogg = None
     ok = await alert_waha.send_text(text_out)
     if not ok:
         ops_log(f"ALERT POST FAILED: {hit['nature']} @ {hit['address']}")
         return "queued"
-    if nat_norm and toks:
-        recent = _load_recent()
-        recent.append({"t": now, "nature": nat_norm, "tokens": sorted(toks)})
-        _save_recent(recent)
     if clip_name:
-        ogg = await asyncio.to_thread(_ensure_ogg, clip_name)
         if ogg:
             base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
             vok = await alert_waha.send_voice(f"{base}/audio/{ogg}")
@@ -568,6 +576,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 ops_log(f"voice-note send failed: {hit['nature']} @ {hit['address']}")
         else:
             ops_log(f"voice-note convert failed: {hit['nature']} @ {hit['address']}")
+    if nat_norm and toks:
+        recent = _load_recent()
+        recent.append({"t": now, "nature": nat_norm, "tokens": sorted(toks)})
+        _save_recent(recent)
     return "sent"
 
 
