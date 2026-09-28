@@ -275,6 +275,12 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                 core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", q.split(",")[0]).strip().lower()
                 qtoks = {t for t in re.split(r"[\s,.&'-]+", core)
                          if len(t) >= 4 and t not in _ADDR_GENERIC and not t.isdigit()}
+                # Planning Labs normalizes ordinals: '64th St' -> '64 STREET' -
+                # the token '64th' never matches; add the digit form ('730 64th
+                # St' was falsely 'not confirmed' 9/28)
+                qtoks |= {re.sub(r"(\d+)(?:st|nd|rd|th)$", r"\1", t)
+                          for t in list(qtoks)
+                          if re.fullmatch(r"\d+(?:st|nd|rd|th)", t)}
                 ltok = label.lower()
                 if qtoks and not any(t in ltok for t in qtoks):
                     logging.info("geocode: rejected wrong-street fallback: %s -> %s", q, label)
@@ -297,6 +303,9 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
             core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", q.split(",")[0]).strip().lower()
             qtoks = {t for t in re.split(r"[\s,.&'-]+", core)
                      if len(t) >= 4 and t not in _ADDR_GENERIC and not t.isdigit()}
+            qtoks |= {re.sub(r"(\d+)(?:st|nd|rd|th)$", r"\1", t)
+                      for t in list(qtoks)
+                      if re.fullmatch(r"\d+(?:st|nd|rd|th)", t)}
             if qtoks and not any(t in disp.lower() for t in qtoks):
                 logging.info("geocode: rejected wrong-street hit: %s -> %s", q, disp)
                 await asyncio.sleep(1.1)
@@ -314,6 +323,91 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
     return False, False, "", None, None, ""
 
 
+_OVERPASS_EPS = ("https://overpass-api.de/api/interpreter",
+                 "https://overpass.kumi.systems/api/interpreter",
+                 "https://overpass.private.coffee/api/interpreter")
+
+
+async def _correct_street_via_crosses(heard_addr: str, cross: str) -> str:
+    """User rule 9/28: when the heard street can't be confirmed but the cross
+    streets are known, the real street is the one that truly crosses BOTH -
+    fuzzy-match its map name against the heard name ('4-0 Haywood' + crosses
+    Bedford/Wythe -> '40 Heyward Street'). Returns the corrected address, or
+    '' when the intersection evidence doesn't pin it (keep 'not confirmed')."""
+    import difflib
+    parts = [p.strip() for p in (cross or "").split("&", 1)]
+    if len(parts) != 2 or not all(parts):
+        return ""
+    hdrs = {"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"}
+
+    async def _ov(q: str, timeout: int = 15):
+        for ep in _OVERPASS_EPS:
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(ep, data={"data": q}, headers=hdrs,
+                                      timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+                        if r.status != 200:
+                            continue
+                        return await r.json()
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    heard_core = re.sub(r"^\s*\d+(?:-\d+)?[A-Za-z]?\s+", "", heard_addr)
+    heard_core = re.sub(r"[,.;].*$", "", heard_core).strip().lower()
+    if not heard_core:
+        return ""
+    pat = "^(" + "|".join(re.escape(p) for p in parts) + ")$"
+    d1 = await _ov(f'[out:json][timeout:15];way["name"~"{pat}",i]'
+                   f'(40.55,-74.06,40.75,-73.85);out geom;')
+    cross_nodes = []
+    for want in parts:
+        nodes = set()
+        for el in (d1 or {}).get("elements") or []:
+            nm = (el.get("tags") or {}).get("name", "").strip().lower()
+            if nm != want.lower():
+                continue
+            for g in el.get("geometry") or []:
+                nodes.add((round(g.get("lat", 0), 6), round(g.get("lon", 0), 6)))
+        if not nodes:
+            return ""
+        cross_nodes.append(nodes)
+    allpts = [p for ns in cross_nodes for p in ns]
+    la = [p[0] for p in allpts]
+    lo = [p[1] for p in allpts]
+    bbox = f"{min(la)-0.008},{min(lo)-0.008},{max(la)+0.008},{max(lo)+0.008}"
+    d2 = await _ov(f'[out:json][timeout:20];way[highway][name]({bbox});out geom;',
+                   timeout=24)
+    best = (0.0, "")
+    for el in (d2 or {}).get("elements") or []:
+        nm = (el.get("tags") or {}).get("name", "").strip()
+        if not nm or nm.lower() in (parts[0].lower(), parts[1].lower()):
+            continue
+        nset = {(round(g.get("lat", 0), 6), round(g.get("lon", 0), 6))
+                for g in el.get("geometry") or []}
+        if not nset or any(not (nset & ns) for ns in cross_nodes):
+            continue  # must truly cross BOTH cross streets
+        score = difflib.SequenceMatcher(None, heard_core, nm.lower()).ratio()
+        if nm.lower()[:1] == heard_core[:1] and score > best[0]:
+            best = (score, nm)
+    if best[0] < 0.70 or not best[1]:
+        logging.info("cross-correction: no street pinning '%s' via [%s] (best %.2f)",
+                     heard_addr, cross, best[0])
+        return ""
+    tok = heard_addr.strip().split(" ", 1)[0]
+    if re.fullmatch(r"\d+-\d+", tok):
+        num = tok.replace("-", "")  # whisper '4-0' = '40'
+    elif re.fullmatch(r"\d+[A-Za-z]?", tok):
+        num = tok
+    else:
+        num = ""
+    mtail = re.search(r",\s*(.*)$", heard_addr)
+    corrected = (f"{num} " if num else "") + best[1] + (", " + mtail.group(1) if mtail else "")
+    logging.info("cross-correction candidate: '%s' + [%s] -> '%s' (score %.2f)",
+                 heard_addr, cross, corrected, best[0])
+    return corrected
+
+
 async def _cross_streets(lat: float, lon: float, address: str) -> tuple:
     """Cross streets via Overpass (free, keyless): ways sharing a node with the
     job's own street truly cross it. Returns (crosses, exact) - ('A & B', True),
@@ -323,18 +417,23 @@ async def _cross_streets(lat: float, lon: float, address: str) -> tuple:
          f'[highway][name];out tags geom;')
     hdrs = {"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"}
     data = None
-    for endpoint in ("https://overpass-api.de/api/interpreter",
-                     "https://overpass.kumi.systems/api/interpreter"):
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(endpoint, data={"data": q}, headers=hdrs,
-                                  timeout=aiohttp.ClientTimeout(total=18)) as r:
-                    if r.status != 200:
-                        continue
-                    data = await r.json()
-                    break
-        except Exception:  # noqa: BLE001
-            continue
+    for attempt in (1, 2):  # one retry pass: Overpass rate-limits bursts
+        for endpoint in _OVERPASS_EPS:
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(endpoint, data={"data": q}, headers=hdrs,
+                                      timeout=aiohttp.ClientTimeout(total=18)) as r:
+                        if r.status != 200:
+                            continue
+                        data = await r.json()
+                        break
+            except Exception:  # noqa: BLE001
+                continue
+            if data is not None:
+                break
+        if data is not None:
+            break
+        await asyncio.sleep(3)
     if data is None:
         return None, False
     skip_hw = {"service", "footway", "path", "track", "cycleway", "pedestrian",
@@ -392,9 +491,7 @@ async def _map_street_names(lat: float, lon: float, street: str = "") -> set:
     so a point-radius pool alone misses them. Fallback: names around the point.
     Overpass is free/keyless; failures just skip canonicalization."""
     hdrs = {"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"}
-    eps = ("https://overpass-api.de/api/interpreter",
-           "https://overpass.kumi.systems/api/interpreter",
-           "https://overpass.private.coffee/api/interpreter")
+    eps = _OVERPASS_EPS
 
     async def _ov(q: str):
         for endpoint in eps:
@@ -508,6 +605,10 @@ async def _box_lookup(box4: str) -> list:
 
 def _heard_box(excerpt: str) -> str | None:
     m = re.search(r"\bbox\s+(\d{1,4})\b", excerpt or "", re.I)
+    if m:
+        return m.group(1).zfill(4)
+    # whisper merges 'class 3, box 383' into 'class 3 383' (107 Clinton Ave 9/28)
+    m = re.search(r"\bclass\s+3\s+(\d{3,4})\b", excerpt or "", re.I)
     return m.group(1).zfill(4) if m else None
 
 
@@ -658,6 +759,17 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 logging.info("[%s] address canonicalized: %s -> %s", profile, hit["address"], fixed_addr)
                 stats.event(profile, f"address canonicalized: {hit['address']} -> {fixed_addr}")
                 hit["address"] = fixed_addr
+    if not verified and cross and GEOCODE_VERIFY:
+        corrected = await _correct_street_via_crosses(hit["address"], cross)
+        if corrected and corrected.lower() != hit["address"].lower():
+            v2, ins2, lbl2, la2, lo2, loc2 = await geocode_verify(corrected, profile)
+            if v2:
+                stats.event(profile, f"address corrected via crosses: "
+                                     f"{hit['address']} -> {corrected}")
+                ops_log(f"address corrected via crosses: {hit['address']} -> {corrected}")
+                hit["address"] = corrected
+                verified, in_sullivan = True, ins2
+                verified_label, lat, lon, locality = lbl2, la2, lo2, loc2
     if not cross:
         ops_log(f"cross streets unresolved: {hit['nature']} @ {hit['address']}")
     colony = None
@@ -682,8 +794,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             toks = _rare_tokens(f"{hit['address']} {cross} {verified_label}")
             inc_street = _street_core(verified_label or hit["address"])
             for loc, borough in rows:
+                sides = {_street_core(p) for p in re.split(r"\s+at\s+|&", loc)}
                 if _rare_tokens(loc) & toks or \
-                        (inc_street and inc_street == _street_core(loc)):
+                        (inc_street and inc_street in sides):
                     box_disp = heard
                     break
             if not box_disp:
