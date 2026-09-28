@@ -65,6 +65,39 @@ async def send_text(text: str, chat_id: str | None = None) -> bool:
     return False
 
 
+async def send_file(caption: str, file_url: str, filename: str, mimetype: str = "audio/wav", chat_id: str | None = None) -> bool:
+    """Send a file (audio clip) with an optional caption. Returns True on success."""
+    if not configured():
+        logging.error("WAHA not configured (need WAHA_URL, WAHA_API_KEY, WAHA_CHAT_ID)")
+        return False
+    url = f"{_base()}/api/sendFile"
+    payload = {
+        "session": _session(),
+        "chatId": chat_id or _chat(),
+        "caption": caption[:4000],
+        "file": {"mimetype": mimetype, "filename": filename, "url": file_url},
+    }
+    last_err = ""
+    for hdr in _API_KEY_HEADERS:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    url, json=payload,
+                    headers={"Content-Type": "application/json", hdr: _key()},
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as r:
+                    body = (await r.text())[:200]
+                    if r.status in (200, 201):
+                        return True
+                    last_err = f"HTTP {r.status}: {body}"
+                    if r.status not in (401, 403):
+                        break
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e)
+    logging.error("WAHA sendFile failed: %s", last_err)
+    return False
+
+
 async def check_session() -> str:
     """Return the WAHA session status string (e.g. 'WORKING') for startup logging."""
     if not configured():

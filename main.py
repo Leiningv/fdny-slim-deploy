@@ -157,7 +157,7 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple[bool, bool]:
     return False, False
 
 
-async def verify_and_send(profile: str, hit: dict, stats) -> str:
+async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None) -> str:
     """User's posting rules (9/28): verified addresses only; Sullivan feed posts
     only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
     Returns 'sent' | 'queued' | 'suppressed'."""
@@ -171,7 +171,13 @@ async def verify_and_send(profile: str, hit: dict, stats) -> str:
         if not verified:
             text_out = text_out.replace(hit["address"], hit["address"] + " (not confirmed)", 1)
             stats.event(profile, f"unconfirmed address: {hit['address']}")
-    ok = await alert_waha.send_text(text_out)
+    if clip_name:
+        base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
+        ok = await alert_waha.send_file(text_out, f"{base}/audio/{clip_name}", clip_name)
+        if not ok:
+            ok = await alert_waha.send_text(text_out)
+    else:
+        ok = await alert_waha.send_text(text_out)
     return "sent" if ok else "queued"
 
 
@@ -254,7 +260,7 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
                 continue
             seen[key] = now
             _save_seen(seen)
-            outcome = await verify_and_send(profile, hit, stats)
+            outcome = await verify_and_send(profile, hit, stats, clip_name)
             ok = outcome == "sent"
             stats.mark_alert(profile, hit["nature"], hit["address"], ok)
             _append_alert_log({"t": now, "feed": profile, "nature": hit["nature"],
@@ -331,7 +337,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
         return
     seen[key] = now
     _save_seen(seen)
-    outcome = await verify_and_send("fdny", hit, stats)
+    outcome = await verify_and_send("fdny", hit, stats, clip_name)
     ok = outcome == "sent"
     stats.mark_alert("fdny", hit["nature"], hit["address"], ok)
     _append_alert_log({"t": now, "feed": "fdny", "nature": hit["nature"],
