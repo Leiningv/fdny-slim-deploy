@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 import alert_waha
+import control
 import detect
 import ingest
 import transcribe
@@ -36,6 +37,19 @@ _OPS_TASKS: list = []
 def ops_log(line: str) -> None:
     logging.info("ops: %s", line)
     _OPS_Q.append(line)
+
+
+async def _kw_check(profile: str, text: str) -> None:
+    """Post a heads-up to the ops group when a transcript hits a watched keyword."""
+    try:
+        watches = control.keyword_watches()
+    except Exception:  # noqa: BLE001
+        return
+    low = text.lower()
+    hits = [w for w in watches if w.lower() in low]
+    if hits:
+        stats.event(profile, f"watch hit ({', '.join(hits)}): {text[:120]}")
+        ops_log(f"\U0001F440 watch hit [{profile}] ({', '.join(hits)}): {text[:200]}")
 
 
 async def _ops_flusher() -> None:
@@ -514,6 +528,11 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
     Returns 'sent' | 'queued' | 'suppressed'."""
     now = time.time()
+    if profile in control.muted_feeds():
+        logging.info("[%s] suppressed (feed muted): %s @ %s", profile, hit["nature"], hit["address"])
+        stats.event(profile, f"suppressed (feed muted): {hit['nature']} @ {hit['address']}")
+        ops_log(f"suppressed (feed muted): {hit['nature']} @ {hit['address']}")
+        return "suppressed"
     if fresh_ts:
         fresh_limit = FRESH_FDNY_SEC if profile == "fdny" else FRESH_LIVE_SEC
         age = time.time() - fresh_ts
@@ -543,10 +562,11 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         stats.event(profile, f"suppressed (no nature): {hit['address']}")
         ops_log(f"suppressed (no nature): {hit['address']}")
         return "suppressed"
-    if profile.lower().startswith(("hatzalah", "zello-hatzalah")) and hit.get("nature") == "Fall":
-        logging.info("[%s] suppressed (Hatzalah Fall excluded): %s", profile, hit["address"])
-        stats.event(profile, f"suppressed (Fall excluded): {hit['address']}")
-        ops_log(f"suppressed (Fall excluded): {hit['address']}")
+    if profile.lower().startswith(("hatzalah", "zello-hatzalah")) and \
+            (hit.get("nature") or "").strip().lower() in control.excluded_natures():
+        logging.info("[%s] suppressed (Hatzalah %s excluded): %s", profile, hit.get("nature"), hit["address"])
+        stats.event(profile, f"suppressed ({hit.get('nature')} excluded): {hit['address']}")
+        ops_log(f"suppressed ({hit.get('nature')} excluded): {hit['address']}")
         return "suppressed"
     box_task = None
     if not profile.lower().startswith(("sullivan", "zello-sullivan")):
@@ -743,6 +763,7 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
                 continue
             stats.mark_transcript(profile, text)
             logging.info("[%s] heard: %s", profile, text[:160])
+            await _kw_check(profile, text)
             clip_name = f"{profile}-{int(time.time())}.wav"
             await asyncio.to_thread(_archive_clip, target, clip_name)
             stats.mark_clip(profile, clip_name, text)
@@ -816,6 +837,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
         return
     stats.mark_transcript("fdny", text)
     logging.info("[fdny] heard: %s", text[:160])
+    await _kw_check("fdny", text)
     if wav is not None:
         clip_name = f"fdny-{int(time.time())}.wav"
         await asyncio.to_thread(_archive_clip, wav, clip_name)

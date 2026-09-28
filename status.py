@@ -14,6 +14,7 @@ Render web service never idles into sleep.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import html
 import json
 import logging
@@ -26,6 +27,8 @@ from collections import deque
 from pathlib import Path
 
 from aiohttp import web
+
+import control
 
 STARTED_AT = time.time()
 ARCHIVE_DIR = Path(os.environ.get("ARCHIVE_DIR", "./segments/archive"))
@@ -118,7 +121,7 @@ class Stats:
                 hist = [{"t": a["t"], "feed": a["feed"], "nature": a["nature"],
                          "address": a["address"], "sent": a["sent"],
                          "outcome": a.get("outcome", "")}
-                        for a in list(self.alerts)[:500]]
+                        for a in sorted(list(self.alerts), key=lambda x: -x["t"])[:500]]
                 self._hist_file.parent.mkdir(parents=True, exist_ok=True)
                 self._hist_file.write_text(json.dumps(hist))
             except Exception:
@@ -159,13 +162,13 @@ class Stats:
                     {"age_sec": self._age(a["t"]), "feed": a["feed"], "nature": a["nature"],
                      "address": a["address"], "sent": a["sent"],
                      "outcome": a.get("outcome") or ("sent" if a["sent"] else "failed")}
-                    for a in list(self.alerts)[:30]
+                    for a in sorted(list(self.alerts), key=lambda x: -x["t"])[:30]
                 ],
                 "alert_history": [
                     {"ts": a["t"], "feed": a["feed"], "nature": a["nature"],
                      "address": a["address"], "sent": a["sent"],
                      "outcome": a.get("outcome") or ("sent" if a["sent"] else "failed")}
-                    for a in list(self.alerts)[:500]
+                    for a in sorted(list(self.alerts), key=lambda x: -x["t"])[:500]
                 ],
                 "clips": [
                     {"age_sec": self._age(c["t"]), "feed": c["feed"],
@@ -274,6 +277,46 @@ async function tick(){
 }
 setInterval(tick,5000);
 """
+
+
+def _control_html() -> str:
+    st = control.load()
+    excl = html.escape(", ".join(st["excluded_natures"]))
+    watch = html.escape(", ".join(st["keyword_watches"]))
+    muted = set(st["muted_feeds"])
+
+    def chk(name: str, label: str) -> str:
+        c = " checked" if name in muted else ""
+        return (f'<label><input type=checkbox name="mute_{name}"{c}>&nbsp; {label}</label>')
+
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>FDNY-SLIM CONTROL</title>
+<style>{_PAGE_CSS}
+input[type=text]{{background:transparent;border:1px solid #3a3e45;color:#e8e9eb;padding:10px;width:100%;font:12px Arial,Helvetica,sans-serif}}
+input[type=checkbox]{{width:18px;height:18px;vertical-align:middle;accent-color:#5fb96e}}
+label{{display:block;padding:11px 0;border-bottom:1px solid #262a30;font-size:13px}}
+button{{background:transparent;border:1px solid #5fb96e;color:#5fb96e;padding:13px 22px;font:700 12px Arial;letter-spacing:3px;cursor:pointer;width:100%;margin-top:16px}}
+.note{{color:#6d737c;font-size:11px;margin:4px 0 12px}}
+</style></head><body>
+<div class=hdr><h1>FDNY-SLIM &nbsp;CONTROL</h1>
+<div class=sub>DISPATCH MONITOR SETTINGS &middot; APPLIES WITHIN SECONDS</div></div>
+<form method=post action="set">
+<div class=sec>EXCLUDED NATURES</div>
+<input type=text name=excluded_natures value="{excl}" placeholder="Fall">
+<div class=note>Hatzalah calls with these natures are suppressed, comma-separated. Default: Fall. Clear the field to post everything.</div>
+<div class=sec>KEYWORD WATCHES</div>
+<input type=text name=keyword_watches value="{watch}" placeholder="BQE, I-278, Tesla">
+<div class=note>Heads-up to FD SYSTEM UPDATES when any feed transcript contains one of these, comma-separated.</div>
+<div class=sec>FEED POSTING</div>
+{chk("fdny", "Mute FDNY Brooklyn dispatch (Calls)")}
+{chk("zello-hatzalah", "Mute Zello TSL-ChevraHatzalah")}
+{chk("zello-sullivan", "Mute Zello Sullivan County")}
+<div class=note>Muted feeds keep recording and transcribing; their alerts are suppressed.</div>
+<button type=submit>SAVE</button>
+</form>
+<div class=note style="margin-top:14px"><a href="/" style="color:#6d737c">&larr; dashboard</a></div>
+</body></html>"""
 
 
 def _html(snap: dict) -> str:
@@ -496,6 +539,77 @@ def make_app(stats: Stats) -> web.Application:
         stats.event("fdny", f"{kept} call(s) pushed via relay")
         return web.json_response({"ok": True, "queued": kept})
 
+    def _ctl_ok(req: web.Request) -> bool:
+        tok = os.environ.get("CONTROL_TOKEN", "")
+        return bool(tok) and hmac.compare_digest(req.match_info["token"], tok)
+
+    async def control_page(req: web.Request) -> web.Response:
+        if not _ctl_ok(req):
+            raise web.HTTPNotFound()
+        return web.Response(text=_control_html(), content_type="text/html")
+
+    async def control_set(req: web.Request) -> web.Response:
+        if not _ctl_ok(req):
+            raise web.HTTPNotFound()
+        d = await req.post()
+        st = {
+            "excluded_natures": [x.strip() for x in str(d.get("excluded_natures", "")).split(",") if x.strip()][:50],
+            "keyword_watches": [x.strip() for x in str(d.get("keyword_watches", "")).split(",") if x.strip()][:50],
+            "muted_feeds": [f for f in ("fdny", "zello-hatzalah", "zello-sullivan") if d.get("mute_" + f)],
+        }
+        control.save(st)
+        stats.event("system", "controls updated: excluded=[" + ", ".join(st["excluded_natures"])
+                    + "] watches=[" + ", ".join(st["keyword_watches"])
+                    + "] muted=[" + ", ".join(st["muted_feeds"]) + "]")
+        raise web.HTTPFound(req.path.rsplit("/", 1)[0] + "/")
+
+    async def history_push(req: web.Request) -> web.Response:
+        # sandbox backfills posted-alert history here (same relay pattern as /hls)
+        secret = os.environ.get("HLS_PUSH_SECRET", "")
+        try:
+            d = await req.json()
+        except Exception:
+            return web.Response(status=400, text="bad json")
+        if not secret or d.get("secret") != secret:
+            return web.Response(status=403, text="bad secret")
+        items = d.get("alerts")
+        if not isinstance(items, list):
+            return web.Response(status=400, text="alerts must be a list")
+        added = 0
+        with stats._lock:
+            existing = {(round(a["t"]), a["feed"], a["nature"], a["address"]) for a in stats.alerts}
+            for it in items[:500]:
+                try:
+                    t = float(it["t"])
+                    feed = str(it["feed"])
+                    nature = str(it.get("nature") or "")
+                    address = str(it.get("address") or "")
+                    sent = bool(it.get("sent", True))
+                    outcome = str(it.get("outcome") or ("sent" if sent else "failed"))
+                except Exception:  # noqa: BLE001
+                    continue
+                key = (round(t), feed, nature, address)
+                if not address or key in existing:
+                    continue
+                stats.alerts.appendleft({"t": t, "feed": feed, "nature": nature,
+                                         "address": address, "sent": sent, "outcome": outcome})
+                existing.add(key)
+                added += 1
+            try:
+                hist = [{"t": a["t"], "feed": a["feed"], "nature": a["nature"],
+                         "address": a["address"], "sent": a["sent"],
+                         "outcome": a.get("outcome", "")}
+                        for a in sorted(stats.alerts, key=lambda x: -x["t"])[:500]]
+                stats._hist_file.parent.mkdir(parents=True, exist_ok=True)
+                stats._hist_file.write_text(json.dumps(hist))
+            except Exception:  # noqa: BLE001
+                pass
+        stats.event("system", f"history backfill: {added} past alert(s) added")
+        return web.json_response({"ok": True, "added": added})
+
+    app.router.add_post("/history", history_push)
+    app.router.add_get("/c/{token}/", control_page)
+    app.router.add_post("/c/{token}/set", control_set)
     app.router.add_get("/health", _health)
     app.router.add_get("/diag", diag)
     app.router.add_post("/hls", hls_push)
@@ -508,7 +622,7 @@ def make_app(stats: Stats) -> web.Application:
 
 async def start_web(stats: Stats) -> None:
     port = int(os.environ.get("PORT", "10000"))
-    runner = web.AppRunner(make_app(stats))
+    runner = web.AppRunner(make_app(stats), access_log=None)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()
     logging.info("status server on :%s (/ /health /status /audio/<file>)", port)
