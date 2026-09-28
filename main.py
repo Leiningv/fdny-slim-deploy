@@ -292,7 +292,7 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                     if len(core.split()) <= 2 or core not in ltok:
                         logging.info("geocode: rejected generic-street fallback: %s -> %s", q, label)
                         continue
-                elif not any(t in ltok for t in qtoks):
+                elif not any(_tok_hit(t, ltok) for t in qtoks):
                     logging.info("geocode: rejected wrong-street fallback: %s -> %s", q, label)
                     continue
                 return True, False, label, lat, lon, (label.split(",")[1].strip() if "," in label else "")
@@ -322,7 +322,7 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                     logging.info("geocode: rejected generic-street hit: %s -> %s", q, disp)
                     await asyncio.sleep(1.1)
                     continue
-            elif not any(t in disp.lower() for t in qtoks):
+            elif not any(_tok_hit(t, disp.lower()) for t in qtoks):
                 logging.info("geocode: rejected wrong-street hit: %s -> %s", q, disp)
                 await asyncio.sleep(1.1)
                 continue
@@ -803,6 +803,14 @@ _ADDR_GENERIC = {"street", "st", "avenue", "ave", "road", "rd", "boulevard", "bl
                  "queens", "manhattan", "bronx", "and", "the", "between", "county", "co"}
 
 
+def _tok_hit(tok: str, haystack: str) -> bool:
+    """Token match on word boundaries: single-letter/short street tokens
+    ('m' from 'Avenue M') must not substring-match inside other words
+    ('Manhattan Ave' is not 'Avenue M')."""
+    return bool(re.search(r"(?<![a-z0-9])" + re.escape(tok) + r"(?![a-z0-9])",
+                          haystack))
+
+
 def _rare_tokens(addr: str) -> set:
     return {t for t in re.split(r"[\s,.&'-]+", addr.lower())
             if len(t) >= 4 and t not in _ADDR_GENERIC and not t.isdigit()}
@@ -885,7 +893,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         return "suppressed"
     box_task = None
     if not profile.lower().startswith(("sullivan", "zello-sullivan")):
-        heard = _heard_box(hit.get("excerpt") or "")
+        heard = hit.get("box_heard") or _heard_box(hit.get("excerpt") or "")
         if heard:
             box_task = asyncio.create_task(_box_lookup(heard))
     ogg_task = None
@@ -987,7 +995,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             rows = await box_task
         except Exception:  # noqa: BLE001
             rows = []
-        heard = _heard_box(hit.get("excerpt") or "")
+        heard = hit.get("box_heard") or _heard_box(hit.get("excerpt") or "")
         if rows and heard:
             toks = _rare_tokens(f"{hit['address']} {cross} {verified_label}")
             inc_street = _street_core(verified_label or hit["address"])
@@ -1186,7 +1194,13 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
             clip_name = f"{profile}-{int(time.time())}.wav"
             await asyncio.to_thread(_archive_clip, target, clip_name)
             stats.mark_clip(profile, clip_name, text)
-            hit = detect.analyze(text, profile)
+            try:
+                hit = detect.analyze(text, profile)
+            except Exception as e:  # noqa: BLE001 - one bad chunk must never kill the feed
+                logging.warning("[%s] detect failed: %s", profile, e)
+                stats.event(profile, f"detect error: {e}")
+                prev = wav
+                continue
             if not hit:
                 continue
             key = f"{profile}|{hit['nature']}|{hit['address']}"
@@ -1267,7 +1281,12 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
             (tmp / f"{cid}{suffix}").unlink()
         except Exception:  # noqa: BLE001
             pass
-    hit = detect.analyze(text, "fdny")
+    try:
+        hit = detect.analyze(text, "fdny")
+    except Exception as e:  # noqa: BLE001 - one bad call must never kill the consumer
+        logging.warning("[fdny] detect failed: %s", e)
+        stats.event("fdny", f"detect error: {e}")
+        return
     if not hit:
         return
     key = f"fdny|{hit['nature']}|{hit['address']}"

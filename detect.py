@@ -273,6 +273,13 @@ def extract_highway_intersection(text: str, profile: str = "hatzolah") -> str | 
     # bare highway only if it is not a numbered surface street corridor
     if idx > 0 and re.search(r"\d{1,5}\s+$", t[:idx]):
         return None  # "7814 rockaway boulevard" is a house address, not a highway
+    # 'any units in East Flatbush' is the neighborhood, not 'Flatbush Ave':
+    # a bare highway keyword after 'in/to/from' or a directional word is a
+    # place reference, not the road
+    pre = t[max(0, idx - 16):idx].strip()
+    if re.search(r"(?:^|\s)(?:in|into|to|from|east|west|north|south)\s+$",
+                 " " + pre + " "):
+        return None
     return hwy
 
 
@@ -332,14 +339,16 @@ _NAME_STOP = {
     "be", "unit", "units", "engine", "ladder", "battalion", "rescue", "squad",
     "truck", "box", "alarm", "phone", "still", "code", "signal", "from",
     "with", "of", "by", "go", "no", "we", "you", "your", "rd", "st", "nd",
-    "th", "ave", "man", "that", "thats", "off", "corner", "near", "next",
+    "th", "ave", "man", "that", "thats", "that's", "off", "corner", "near",
+    "next", "up", "out", "just", "right", "fire", "smoke",
 }
 
 
 def _ok_name(n: str) -> bool:
-    if len(n) < 2 or n in _NAME_STOP or n.split()[0] in _NAME_STOP:
+    ws = n.split()
+    if len(n) < 2 or not ws or any(w in _NAME_STOP for w in ws):
         return False
-    return all(w not in ("rd", "st", "nd", "th", "ave") for w in n.split())
+    return all(w not in ("rd", "st", "nd", "th", "ave") for w in ws)
 
 
 _STREET_TYPE = r"(?:street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter|way|circle|cir)"
@@ -452,6 +461,13 @@ def extract_named_cross(text: str) -> str | None:
         return None
     n1, t1, n2 = m.group(1).strip(), m.group(2), m.group(3).strip()
     t2 = m.group(4) or "st"
+    # leading dispatcher glue is not part of the street name ('that's off
+    # Manhattan Avenue and Graham Avenue' posted 'That'S Off Manhattan Ave'
+    # 9/28) - strip leading filler words before validating
+    w1 = n1.split()
+    while w1 and w1[0] in _NAME_STOP:
+        w1.pop(0)
+    n1 = " ".join(w1)
     if n1 == n2 or not _ok_name(n1) or not _ok_name(n2):
         return None
     p1 = f"{_addr_title(n1)} {_STREET_ABBREV.get(t1.lower(), t1.title())}"
@@ -473,7 +489,9 @@ _FDNY_SKIP_RE = re.compile(
 
 def detect_box(text: str) -> str | None:
     t = text.lower()
-    m = re.search(r"(?:box|alarm)\s+(\d{2,4})", t)
+    # user ruling 9/28 13:36: only a spoken 'box NNNN' counts - 'alarm 2584'
+    # is a class-3/alarm readout, not a box number
+    m = re.search(r"\bbox\s+(\d{2,4})", t)
     if m:
         return m.group(1).zfill(4)
     return None
@@ -520,12 +538,17 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
             r"\b(\d{1,5})\s+([a-z][a-z'\-]*(?:\s+[a-z][a-z'\-]*){0,2})\s+"
             r"(street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
             r"lane|ln|parkway|pkwy)\b", _norm(text).lower())
-        if hn and hn.group(2) not in _NAME_STOP:
-            typ = {"st": "street", "ave": "avenue", "rd": "road", "dr": "drive",
-                   "blvd": "boulevard", "pl": "place", "ln": "lane",
-                   "pkwy": "parkway"}.get(hn.group(3), hn.group(3))
-            return _with_area(f"{hn.group(1)} {_addr_title(hn.group(2) + ' ' + typ)}",
-                              profile, text)
+        if hn:
+            w2 = hn.group(2).split()
+            while w2 and w2[0] in _NAME_STOP:
+                w2.pop(0)
+            nm = " ".join(w2)
+            if nm and nm not in _NAME_STOP:
+                typ = {"st": "street", "ave": "avenue", "rd": "road", "dr": "drive",
+                       "blvd": "boulevard", "pl": "place", "ln": "lane",
+                       "pkwy": "parkway"}.get(hn.group(3), hn.group(3))
+                return _with_area(f"{hn.group(1)} {_addr_title(nm + ' ' + typ)}",
+                                  profile, text)
         num0 = _FIRE_NUM_DISPATCH_RE.search(text)
         if num0:
             return _with_area(f"{num0.group(1)} {_addr_title(num0.group(2).strip())}", profile, text)
@@ -546,9 +569,11 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         return _with_area(f"{num.group(1)} {_addr_title(num.group(2).strip())}", profile, text)
     lone = _LONE_STREET_RE.search(text)
     if lone:
-        street = re.sub(r"^(?:on|the|at|in|to|of|for)\s+", "", lone.group(1).strip(), flags=re.I)
-        street = _addr_title(street)
-        if len(street) > 6:
+        ws = lone.group(1).strip().split()
+        while len(ws) > 1 and ws[0].lower() in _NAME_STOP:
+            ws.pop(0)
+        street = _addr_title(" ".join(ws))
+        if len(ws) > 1 and len(street) > 6:
             return _with_area(street, profile, text)
     if profile == "sullivan":
         for k, v in SULLIVAN_AREAS.items():
@@ -780,7 +805,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         if len(place) >= 3:
             addr = _with_area(_addr_title(place), profile, t)
     if not addr and any_units:
-        tail = next(g for g in any_units.groups() if g)
+        tail = next((g for g in any_units.groups() if g), "")
         place = re.split(r"\s+for\s+", tail, maxsplit=1)[0].strip(" .,")
         named = re.search(r"\b([a-z]{3,15})\s+and\s+([a-z]{3,15})\b", tail.lower())
         if named and not any(w in _CROSS_STOPWORDS for w in named.groups()):
@@ -838,6 +863,10 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "nature": get_nature(t, profile),
         "address": addr,
         "excerpt": t[:280],
+        # box spoken anywhere in the chunk (the excerpt above truncates at
+        # 280 chars - a late-spoken 'box NNNN' was missed and fell through
+        # to the closest-box lookup)
+        "box_heard": detect_box(t),
         "priority": is_priority(t),
         "cross": cross,
     }
