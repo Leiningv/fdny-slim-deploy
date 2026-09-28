@@ -784,6 +784,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         except Exception as e:  # noqa: BLE001
             logging.warning("colony match failed: %s", e)
     box_disp = ""
+    box_loc = ""
     if box_task is not None:
         try:
             rows = await box_task
@@ -799,6 +800,18 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                         (inc_street and inc_street in sides):
                     box_disp = heard
                     break
+            if not box_disp and not verified:
+                # user rule 9/28: anchor on the box - when the heard address
+                # can't be confirmed, the box location is still true proximity;
+                # post number + location instead of dropping the box
+                pick = next((l for l, b in rows
+                             if locality and b.lower() == locality.lower()), rows[0][0])
+                box_disp = heard
+                box_loc = re.sub(r"\bAt\b", "at", pick.title())
+                stats.event(profile, f"box as proximity (address unconfirmed): "
+                                     f"Box {heard} - {box_loc}")
+                ops_log(f"box as proximity (address unconfirmed): Box {heard} - {box_loc} "
+                        f"for {hit['address']}")
             if not box_disp:
                 logging.info("[%s] box mismatch: heard Box %s, lookup %s", profile, heard, rows)
                 stats.event(profile, f"box mismatch (not posted): heard {heard}, lookup "
@@ -808,7 +821,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         elif heard:
             logging.info("[%s] box %s not in lookup DB - not posted", profile, heard)
             stats.event(profile, f"box {heard} not in lookup DB (not posted)")
-    text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony, box=box_disp)
+    text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony,
+                            box=box_disp, box_loc=box_loc)
     ogg = None
     if ogg_task is not None:
         try:
@@ -839,7 +853,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
 
 
 def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
-                 footer: str | None = None, box: str = "") -> str:
+                 footer: str | None = None, box: str = "", box_loc: str = "") -> str:
     """User-picked layout (9/28, option 1): bold caps nature header with fire
     emoji; bold pinned address; plain 'between X & Y' crosses line; time;
     italic source footer at the very bottom. No transcript quote, ever.
@@ -853,7 +867,10 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     if crosses:
         lines.append(f"between {crosses}")
     if box:
-        lines.append(f"\N{PAGER} Box {box}")
+        line = f"\N{PAGER} Box {box}"
+        if box_loc:
+            line += f" - {box_loc}"
+        lines.append(line)
     lines += ["", f"\N{CLOCK FACE ONE OCLOCK} {now}"]
     label = footer or SOURCE_LABEL.get(hit["source"], hit["source"])
     lines.append(f"_{label}_")
