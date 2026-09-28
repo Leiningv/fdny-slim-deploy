@@ -1297,6 +1297,14 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "nature": nature,
         "apartment": apt if profile != "fdny" else "",
         "address": addr,
+        # A verified, specifically named complex is more useful than the
+        # adjacent highway alone. Preserve its service-road access only when
+        # dispatch itself states both, not on an incidental tower mention.
+        "north_shore_towers": bool(profile == "hatzolah" and nature and
+            re.search(r"\bNorth Shore Towers?\b", t, re.I) and
+            re.search(r"\bGrand Central Parkway\b", t, re.I)),
+        "service_road_spoken": bool(re.search(
+            r"\bGrand Central Parkway service road\b", t, re.I)),
         "excerpt": t[:280],
         # box spoken anywhere in the chunk (the excerpt above truncates at
         # 280 chars - a late-spoken 'box NNNN' was missed and fell through
@@ -1312,4 +1320,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
-                                  }
+    }
