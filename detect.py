@@ -393,6 +393,13 @@ def extract_audio_crosses(text: str) -> str | None:
             r = _pair(m.group(1), m.group(2))
             if r:
                 return r
+    # adjacent numbered crosses sharing one suffix, 'to' lost by whisper:
+    # "East 99 East 100 Street" (9903 Flatlands 9/28)
+    m = re.search(rf"\b((?:east|west|north|south)\s*\d{{1,3}}(?:st|nd|rd|th)?)\s+(?:to\s+)?((?:east|west|north|south)\s*\d{{1,3}}(?:st|nd|rd|th)?\s+{_T})\b", t, re.I)
+    if m:
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
     # bare to anchored: "Buffalo to Ralph Avenue", "3 to 4 Avenue"
     m = re.search(rf"\b({_BARE})\s+to\s+({_ANCH})\b", t, re.I)
     if m:
@@ -595,14 +602,19 @@ def get_nature(text: str) -> str:
         return "Outside Fire"
     if re.search(r"\baided\b", t):
         return "Aided Case"
+    # content natures beat alarm-type fallbacks: a phone/automatic alarm FOR an
+    # odor of gas must post the gas nature, not the transmission type (9903
+    # Flatlands 9/28 posted 'PHONE ALARM (FIRE)' over a spoken gas odor)
+    if re.search(r"\bodou?r of gas\b", t):
+        return "Odor of Gas"
+    if re.search(r"\bgas leak\b", t):
+        return "Gas Leak"
     if re.search(r"\b(?:fire|smoke|automatic|smoke detector|co)\s+alarm\b|\balarm activation\b|\bclass\s*3\b", t):
         return "Automatic Alarm"
     if "phone alarm" in t or "still alarm" in t:
         return "Phone Alarm (Fire)"
     if re.search(r"\b(?:fire|smoke|burning)\b", t) and not _negative_fire_context(t):
         return "Fire" if "fire" in t or "burning" in t else "Smoke Condition"
-    if re.search(r"\bgas leak\b|\bodou?r of gas\b", t):
-        return "Gas Leak"
     if re.search(r"\b(?:ems|ambulance|sick person|medical emergency|aided)\b", t):
         return "EMS"
     return ""
