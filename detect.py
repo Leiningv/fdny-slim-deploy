@@ -540,15 +540,26 @@ _FDNY_SKIP_RE = re.compile(
 
 
 def _split_box_glue(t: str) -> str:
-    """Whisper glues the house number onto the box readout ('box 957 70
-    Herkimer' -> 'box 95770 herkimer'): re-split over-long digit runs so the
-    box keeps 2-4 digits and the remainder is a plausible house number
-    (starts 1-9). 5+ contiguous digits after 'box' is always glue - FDNY
-    boxes are at most 4 digits (bad post 9/28 8:03 AM: box 957 + 70 Herkimer
-    posted as box 9577)."""
+    """Split Whisper's box+house digit run before the street name.
+
+    Six digits are usually a three-digit box followed by a three-digit
+    house number: 258648 = Box 258, 648 Grand Street (verified against
+    Manhattan Ave & Grand St and the spoken Manhattan/Leonard crosses).
+    A five-digit run uses a three-digit box + two-digit house (95770).
+    Other lengths retain the four-digit box candidate. Only split when a
+    named street type follows, not a standalone box, date or radio code.
+    """
+    street_after = re.compile(
+        r"\s+(?:[A-Za-z][A-Za-z.'-]*\s+){0,3}"
+        r"(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|place|pl|"
+        r"boulevard|blvd|parkway|pkwy)\b", re.I)
+
     def _rep(m):
         run = m.group(1)
-        for blen in (4, 3, 2):
+        if not street_after.match(t[m.end():]):
+            return m.group(0)
+        preferred = {5: (3, 4, 2), 6: (3, 4, 2), 7: (4, 3, 2)}
+        for blen in preferred.get(len(run), (4, 3, 2)):
             house = run[blen:]
             if 1 <= len(house) <= 4 and house[0] != "0":
                 return f"box {run[:blen]}, {house}"
@@ -980,6 +991,10 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         return None
     if is_chatter(t):
         return None
+    box_glue_ambiguous = bool(re.search(
+        r"\bbox\s+\d{6}(?=\s+(?:[a-z][a-z.'-]*\s+){0,3}"
+        r"(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|place|pl|"
+        r"boulevard|blvd|parkway|pkwy)\b)", _norm(text), re.I))
     # A spoken location intersection outranks the lone typed street that a
     # generic address regex would otherwise extract (Hampton job 9/28).
     spoken_pair = extract_audio_crosses(t) if profile != "fdny" else None
@@ -1062,6 +1077,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         # 280 chars - a late-spoken 'box NNNN' was missed and fell through
         # to the closest-box lookup)
         "box_heard": detect_box(t),
+        "box_glue_ambiguous": box_glue_ambiguous,
         "priority": is_priority(t),
         "cross": cross,
     }
