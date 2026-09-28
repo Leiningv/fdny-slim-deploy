@@ -71,6 +71,11 @@ def _ensure_ogg(clip_name: str):
 
 NY = ZoneInfo("America/New_York")
 DEDUP_SEC = int(os.environ.get("DEDUP_SECONDS", str(30 * 60)))
+# Freshness gate (user rule 9/28: "Never post an old recording - has to be on
+# time. It's an alert system for first responders."). A stale alert is worse
+# than none: suppress + ops-log instead of posting.
+FRESH_LIVE_SEC = int(os.environ.get("FRESH_LIVE_SEC", "300"))   # Zello/HLS live: normal lag <2 min
+FRESH_FDNY_SEC = int(os.environ.get("FRESH_FDNY_SEC", "600"))   # Broadcastify Calls: normal lag 2-5 min
 SEG_DIR = Path(os.environ.get("SEG_DIR", "./segments"))
 SEEN_FILE = Path(os.environ.get("SEEN_FILE", "./segments/seen.json"))
 FDNY_INBOX = SEG_DIR / "fdny_inbox.jsonl"
@@ -445,11 +450,21 @@ def _save_recent(rows: list) -> None:
         pass
 
 
-async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None) -> str:
+async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None,
+                            fresh_ts: float | None = None) -> str:
     """User's posting rules (9/28): verified addresses only; Sullivan feed posts
     only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
     Returns 'sent' | 'queued' | 'suppressed'."""
     now = time.time()
+    if fresh_ts:
+        fresh_limit = FRESH_FDNY_SEC if profile == "fdny" else FRESH_LIVE_SEC
+        age = time.time() - fresh_ts
+        if age > fresh_limit:
+            logging.info("[%s] suppressed (stale, %.0fm old, limit %dm): %s @ %s",
+                         profile, age / 60, fresh_limit / 60, hit["nature"], hit["address"])
+            stats.event(profile, f"suppressed (stale, {age / 60:.0f}m old): {hit['nature']} @ {hit['address']}")
+            ops_log(f"suppressed (stale, {age / 60:.0f}m old): {hit['nature']} @ {hit['address']}")
+            return "suppressed"
     nat_norm = (hit.get("nature") or "").strip().lower()
     toks = _rare_tokens(hit["address"])
     if nat_norm and toks:
@@ -643,7 +658,8 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
                 continue
             seen[key] = now
             _save_seen(seen)
-            outcome = await verify_and_send(profile, hit, stats, clip_name)
+            outcome = await verify_and_send(profile, hit, stats, clip_name,
+                                            fresh_ts=wav.stat().st_mtime)
             ok = outcome == "sent"
             stats.mark_alert(profile, hit["nature"], hit["address"], ok, failed=(outcome == "queued"))
             _append_alert_log({"t": now, "feed": profile, "nature": hit["nature"],
@@ -720,7 +736,11 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
         return
     seen[key] = now
     _save_seen(seen)
-    outcome = await verify_and_send("fdny", hit, stats, clip_name)
+    try:
+        call_ts = float(call.get("ts") or 0) or None
+    except Exception:  # noqa: BLE001
+        call_ts = None
+    outcome = await verify_and_send("fdny", hit, stats, clip_name, fresh_ts=call_ts)
     ok = outcome == "sent"
     stats.mark_alert("fdny", hit["nature"], hit["address"], ok, failed=(outcome == "queued"))
     _append_alert_log({"t": now, "feed": "fdny", "nature": hit["nature"],
