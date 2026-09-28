@@ -301,8 +301,10 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
     p = profile.lower()
     if "fdny" in p or "hatzalah" in p or "hatzolah" in p:
         boroughs = ["Brooklyn"] if "fdny" in p else ["Brooklyn", "Queens", "Manhattan", "Bronx", "Staten Island"]
-        if addr.upper().endswith(", NJ"):
-            boroughs = []
+        requested_area = addr.split(",")[1].strip().lower() if "," in addr else ""
+        if addr.upper().endswith(", NJ") or (requested_area and requested_area not in
+                ("brooklyn", "queens", "manhattan", "bronx", "staten island", "riverdale", "new york")):
+            boroughs = []  # Non-borough NY towns must resolve with county/town-aware Nominatim.
         for q in _geocode_variants(addr, profile):
             if not boroughs:
                 break  # NJ uses county-aware Nominatim; NYC search is invalid.
@@ -452,6 +454,12 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
             county = str(ad.get("county", ""))
             locality = str(ad.get("village") or ad.get("town") or ad.get("city")
                            or ad.get("hamlet") or ad.get("borough") or "")
+            # Nominatim sometimes reports NYC roads with city="New York"
+            # even when county=Queens. The county is the borough evidence.
+            if "hatzal" in p or "hatzol" in p:
+                locality = {"Kings County": "Brooklyn", "Queens County": "Queens",
+                            "New York County": "Manhattan", "Bronx County": "Bronx",
+                            "Richmond County": "Staten Island"}.get(county_name, locality)
             if "fdny" in p and ("Kings" not in county_name and
                                  "Brooklyn" not in str(ad.get("borough", ""))):
                 continue
@@ -475,6 +483,19 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                     continue
                 if requested_area.lower() in ("rockland", "monsey"):
                     continue
+                # For a named small NY locality, a permitted county alone is
+                # not proof: "Corbett" must not become Franklin Square.
+                # Only use a normalized exact town/hamlet token, not a
+                # substring in an unrelated administrative label.
+                known_boroughs = ("brooklyn", "queens", "manhattan", "bronx",
+                                  "staten island", "riverdale", "new york")
+                if state in ("New York", "NY") and requested_area.lower() not in known_boroughs:
+                    names = [str(ad.get(k) or "").lower() for k in
+                             ("city", "town", "village", "hamlet", "suburb")]
+                    normalized = [re.sub(r"^(?:village|town|city|hamlet) of\s+", "", x).strip()
+                                  for x in names if x]
+                    if requested_area.lower() not in normalized:
+                        continue
             lat = lon = None
             try:
                 lat, lon = float(res[0].get("lat")), float(res[0].get("lon"))
@@ -963,6 +984,27 @@ def _box_address_correction(heard_addr: str, rows: list) -> str:
     return ""
 
 
+def _box_row_matches_address_and_cross(location: str, address: str, crosses: str) -> bool:
+    """Box row 'SURF AVE at W 25 ST' corroborates the spoken W 25th
+    address + Surf cross. Ordinal '25th' and source '25' are same street;
+    'W' and 'West' are the same direction. Never compare mere city tokens.
+    """
+    def canon(street: str) -> str:
+        t = street.lower().strip()
+        t = re.sub(r"\bwest\b", "w", t)
+        t = re.sub(r"\beast\b", "e", t)
+        t = re.sub(r"\bnorth\b", "n", t)
+        t = re.sub(r"\bsouth\b", "s", t)
+        t = re.sub(r"\bavenue\b", "ave", t)
+        t = re.sub(r"\bstreet\b", "st", t)
+        t = re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", r"\1", t)
+        return re.sub(r"\s+", " ", t).strip()
+    row_sides = [canon(x) for x in re.split(r"\s+at\s+|\s*&\s*", location, flags=re.I)]
+    own = canon(re.sub(r"^\d+\s+", "", address.split(",", 1)[0]))
+    cross_sides = [canon(x) for x in re.split(r"\s*&\s*", crosses) if x.strip()]
+    return bool(own and cross_sides and own in row_sides and any(x in row_sides for x in cross_sides))
+
+
 def _heard_box(excerpt: str) -> str | None:
     # user ruling 9/28 13:36: 'class 3 2584' digits are an ALARM readout, not a
     # box ('it can come over as a class 3... but the box is wrong') - only a
@@ -1218,7 +1260,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             inc_street = _street_core(verified_label or hit["address"])
             for loc, borough in rows:
                 sides = {_street_core(p) for p in re.split(r"\s+at\s+|&", loc)}
-                if _rare_tokens(loc) & toks or \
+                if _box_row_matches_address_and_cross(loc, hit["address"], cross) or \
+                        _rare_tokens(loc) & toks or \
                         (inc_street and inc_street in sides):
                     box_disp = heard
                     break
@@ -1386,6 +1429,8 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         r"chest pain|drown|syncope|faint|passed out|diabet|sugar|allergic|"
         r"anaphyla|bee sting|abdominal|stomach|altered|disoriented|"
         r"unconscious|aided|trauma|general illness|generally ill|gi distress|"
+        r"not feeling well|feeling unwell|feels unwell|feels ill|feeling ill|"
+        r"doesn.t feel well|does not feel well|"
         r"sick person|medical emergency|ped(?:estrian)?|mva|mvc|accident|"
         r"collision|rollover|entrap)\w*\b", nature, re.I)
     icon = "\N{AMBULANCE}" if medical else "\N{FIRE}"
