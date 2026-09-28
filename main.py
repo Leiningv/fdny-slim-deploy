@@ -24,6 +24,7 @@ import alert_waha
 import detect
 import ingest
 import transcribe
+import zello_ingest
 from status import ARCHIVE_DIR, ARCHIVE_KEEP, Stats, keepalive, start_web
 
 NY = ZoneInfo("America/New_York")
@@ -99,8 +100,9 @@ def _save_seen(seen: dict) -> None:
 def format_alert(hit: dict) -> str:
     now = datetime.now(NY).strftime("%-m/%-d %-I:%M %p")
     label = SOURCE_LABEL.get(hit["source"], hit["source"])
+    priority = "\N{POLICE CARS REVOLVING LIGHT} PRIORITY — " if hit.get("priority") else ""
     return (
-        f"\N{FIRE} {hit['nature']} — {label}\n"
+        f"{priority}\N{FIRE} {hit['nature']} — {label}\n"
         f"\N{ROUND PUSHPIN} {hit['address']}\n"
         f"\N{CLOCK FACE ONE OCLOCK} {now} ET\n"
         f'"{hit["excerpt"]}"'
@@ -341,6 +343,8 @@ async def amain() -> None:
     loop = asyncio.get_running_loop()
     for profile in ingest.FEEDS:
         loop.run_in_executor(None, ingest.supervisor, profile, SEG_DIR, stats)
+    for profile in zello_ingest.CHANNELS:
+        loop.run_in_executor(None, zello_ingest.supervisor, profile, SEG_DIR, stats)
     stats.mark_ffmpeg_start("fdny")  # push-driven capture; keeps the card honest
     stats.event("fdny", "calls ingest armed (sandbox poller -> /fdny_calls)")
     seen = _load_seen()
@@ -348,6 +352,7 @@ async def amain() -> None:
     await start_web(stats)
     await asyncio.gather(
         *(consumer(p, stats, seen) for p in ingest.FEEDS),
+        *(consumer(p, stats, seen) for p in zello_ingest.CHANNELS),
         fdny_consumer(stats, seen),
         keepalive(stats),
         waha_watch(stats),

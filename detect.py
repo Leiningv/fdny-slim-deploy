@@ -57,6 +57,29 @@ def is_emergency(text: str) -> bool:
 # ---------------------------------------------------------------------------
 # Service areas
 # ---------------------------------------------------------------------------
+FIVE_TOWNS_AREAS = {
+    "woodmere": "Woodmere",
+    "lawrence": "Lawrence",
+    "cedarhurst": "Cedarhurst",
+    "inwood": "Inwood",
+    "hewlett": "Hewlett",
+    "atlantic beach": "Atlantic Beach",
+    "five towns": "Five Towns",
+    "far rockaway": "Far Rockaway",
+    "valley stream": "Valley Stream",
+    "lynbrook": "Lynbrook",
+}
+
+
+def get_hatzolah_area(text: str) -> str:
+    """TSL-ChevraHatzolah covers Brooklyn AND the Five Towns."""
+    t = text.lower()
+    for k, v in FIVE_TOWNS_AREAS.items():
+        if k in t:
+            return v
+    return "Brooklyn"
+
+
 SULLIVAN_AREAS = {
     "south fallsburg": "S Fallsburg",
     "woodridge": "Woodridge",
@@ -328,11 +351,17 @@ def get_sullivan_area(text: str) -> str:
 
 
 def _with_area(addr: str, profile: str, text: str) -> str:
-    area = "Brooklyn, NY" if profile in ("hatzolah", "fdny") else f"{get_sullivan_area(text)}, NY"
+    area = f"{get_hatzolah_area(text)}, NY" if profile in ("hatzolah", "fdny") else f"{get_sullivan_area(text)}, NY"
     town = area.split(",")[0].strip().lower()
     if town and town in addr.lower():
         return addr if ", NY" in addr else f"{addr}, NY"
     return f"{addr}, {area}"
+
+
+_LONE_STREET_RE = re.compile(
+    r"\b((?:[A-Za-z0-9.'-]+\s+){1,2}(?:Ave(?:nue)?|St(?:reet)?|Rd|Road|Blvd|Boulevard|"
+    r"Dr|Drive|Ln|Lane|Ct|Court|Pl(?:ace)?|Pkwy|Parkway|Ter(?:race)?|Way|"
+    r"Cir(?:cle)?|Hwy|Highway|Tpke|Turnpike))\b", re.I)
 
 
 def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None:
@@ -350,6 +379,12 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
     house = extract_house_address(text)
     if house:
         return _with_area(house, profile, text)
+    lone = _LONE_STREET_RE.search(text)
+    if lone:
+        street = re.sub(r"^(?:on|the|at|in|to|of|for)\s+", "", lone.group(1).strip(), flags=re.I)
+        street = street.title()
+        if len(street) > 6:
+            return _with_area(street, profile, text)
     if profile == "sullivan":
         for k, v in SULLIVAN_AREAS.items():
             if k in text.lower():
@@ -415,6 +450,13 @@ _CHATTER_RE = re.compile(
     r"radio check|test test)\b", re.I)
 
 
+# Hatzalah dispatches often open "Any units in <place> for <nature>" - no
+# formal address, but it IS a job. Matches the whole tail; address resolution
+# still prefers a real street mention inside it.
+_ANY_UNITS_RE = re.compile(
+    r"\bany\s+units?\s+(?:needed\s+)?(?:in|to|at)\s+(.{2,120})", re.I)
+
+
 def is_chatter(text: str) -> bool:
     if not _CHATTER_RE.search(text):
         return False
@@ -425,16 +467,65 @@ def is_chatter(text: str) -> bool:
     return True
 
 
+
+# ---------------------------------------------------------------------------
+# PRIORITY (life-threat) keyword list - the one obvious spot to tune.
+# Any alert whose transcript contains one of these lowercase substrings gets
+# hit["priority"] = True and a 🚨 PRIORITY tag in the group message.
+# EMS (Hatzalah) and fire/rescue (Sullivan/FDNY) vocabulary mixed; edit freely.
+# ---------------------------------------------------------------------------
+PRIORITY_KEYWORDS = [
+    "cpr",
+    "respiratory distress",
+    "difficulty breathing",
+    "cardiac",
+    "pediatric",
+    "unconscious",
+    "unresponsive",
+    "not breathing",
+    "no pulse",
+    "cardiac arrest",
+    "choking",
+    "anaphylax",
+    "overdose",
+    "severe bleeding",
+    "mva with injuries",
+    "pedestrian struck",
+    "entrapment",
+    "trapped",
+    "drowning",
+    "electrocution",
+    "structure fire",
+    "working fire",
+    "fire in the structure",
+    "people trapped",
+]
+
+
+def is_priority(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in PRIORITY_KEYWORDS)
+
+
 def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     """Return an alert dict, or None when this chunk should not alert."""
+    source = profile
+    profile = profile.removeprefix("zello-")  # zello-* reuses base grammar
+    if profile == "hatzalah":  # source label spelling -> grammar spelling
+        profile = "hatzolah"
     t = _norm(text)
     if len(t) < 10:
         return None
-    if not is_emergency(t):
+    any_units = _ANY_UNITS_RE.search(t)
+    if not is_emergency(t) and not any_units:
         return None
     if is_chatter(t):
         return None
     addr = extract_dispatch_address(t, profile)
+    if not addr and any_units:
+        place = re.split(r"\s+for\s+", any_units.group(1), maxsplit=1)[0].strip(" .,")
+        if len(place) >= 3:
+            addr = _with_area(place.title(), profile, t)
     if not addr and profile == "fdny":
         low = t.lower()
         box = detect_box(low)
@@ -443,8 +534,9 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     if not addr:
         return None
     return {
-        "source": profile,
+        "source": source,
         "nature": get_nature(t),
         "address": addr,
         "excerpt": t[:280],
+        "priority": is_priority(t),
     }
