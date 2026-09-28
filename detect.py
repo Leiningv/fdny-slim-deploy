@@ -99,6 +99,10 @@ SULLIVAN_AREAS = {
     "woodbourne": "Woodbourne",
     "monticello": "Monticello",
     "liberty": "Liberty",
+    "lock sheldrick": "Loch Sheldrake",  # whisper variant, verified 9/28
+    "loch sheldrake": "Loch Sheldrake",
+    "ganser": "Loch Sheldrake",  # Ganser Road is in Loch Sheldrake
+    "blue maple": "Loch Sheldrake",  # Blue Maple Estates, Loch Sheldrake
 }
 
 # Brooklyn-relevant highways (trimmed from NYC_HIGHWAYS; whisper variants kept)
@@ -454,6 +458,7 @@ def get_sullivan_area(text: str) -> str:
 
 
 def _with_area(addr: str, profile: str, text: str) -> str:
+    addr = re.sub(r"^(?:and|or)\s+", "", addr.strip(), flags=re.I)
     area = f"{get_hatzolah_area(text)}, NY" if profile in ("hatzolah", "fdny") else f"{get_sullivan_area(text)}, NY"
     town = area.split(",")[0].strip().lower()
     if town and town in addr.lower():

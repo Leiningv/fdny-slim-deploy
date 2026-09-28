@@ -88,14 +88,15 @@ class Stats:
             self.clips.appendleft({"t": time.time(), "feed": profile,
                                    "file": filename, "transcript": transcript[:200]})
 
-    def mark_alert(self, profile: str, nature: str, address: str, ok: bool) -> None:
+    def mark_alert(self, profile: str, nature: str, address: str, ok: bool,
+                   failed: bool = True) -> None:
         with self._lock:
             f = self.feed(profile)
             f["last_alert_at"] = time.time()
             f["last_alert"] = f"{nature} @ {address}"
             if ok:
                 self.alerts_sent += 1
-            else:
+            elif failed:
                 self.alerts_failed += 1
             self.alerts.appendleft({"t": time.time(), "feed": profile,
                                     "nature": nature, "address": address, "sent": ok})

@@ -164,6 +164,11 @@ def _geocode_variants(addr: str, profile: str) -> list[str]:
     if profile == "sullivan":
         variants.append(f"{street}, Sullivan County, NY")
         variants.append(f"{street}, Monticello, NY")
+    if "hatzal" in profile.lower() or "hatzol" in profile.lower():
+        # TSL/Chevra covers NYC + Sullivan/Five Towns: the extracted area suffix
+        # is a guess ("Brooklyn" by default) - also try de-biased queries
+        variants.append(f"{street}, Sullivan County, NY")
+        variants.append(f"{street}, NY")
     return [v for i, v in enumerate(variants) if v not in variants[:i]]
 
 
@@ -214,7 +219,7 @@ async def _planning_labs(addr: str, allowed_boroughs: list[str]) -> tuple:
 
 
 async def geocode_verify(addr: str, profile: str = "") -> tuple:
-    """Returns (verified, in_sullivan_county, verified_label, lat, lon).
+    """Returns (verified, in_sullivan_county, verified_label, lat, lon, locality).
     NYC profiles: Planning Labs with the old system's borough filters (FDNY
     Brooklyn-only; Hatzalah Brooklyn/Queens/Manhattan/Bronx), Nominatim fallback.
     Sullivan: Nominatim + county check."""
@@ -226,25 +231,49 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
             if label == "":
                 break  # network failure -> Nominatim fallback
             if label:
-                return True, False, label, lat, lon
+                # reject fallback hits on a DIFFERENT street (e.g. "Ganser Road"
+                # matching "Shore Road Park") - the label must share a rare
+                # street token with the query, else it's not this address
+                core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", q.split(",")[0]).strip().lower()
+                qtoks = {t for t in re.split(r"[\s,.&'-]+", core)
+                         if len(t) >= 4 and t not in _ADDR_GENERIC and not t.isdigit()}
+                ltok = label.lower()
+                if qtoks and not any(t in ltok for t in qtoks):
+                    logging.info("geocode: rejected wrong-street fallback: %s -> %s", q, label)
+                    continue
+                return True, False, label, lat, lon, (label.split(",")[1].strip() if "," in label else "")
         if "fdny" in p:
-            return False, False, "", None, None
+            return False, False, "", None, None, ""
         # hatzalah: fall through to Nominatim for non-NYC (5 Towns, Rockland...)
     for q in _geocode_variants(addr, profile):
         res = await _nominatim(q)
         if res is None:
-            return False, False, "", None, None  # network/API failure: don't burn retries
+            return False, False, "", None, None, ""  # network/API failure: don't burn retries
         if res:
             disp = str(res[0].get("display_name", ""))
-            county = str((res[0].get("address") or {}).get("county", ""))
+            ad = res[0].get("address") or {}
+            if ("hatzal" in p or "hatzol" in p) and str(ad.get("state", "")) not in ("New York", "NY"):
+                logging.info("geocode: rejected out-of-state hit: %s -> %s", q, disp)
+                await asyncio.sleep(1.1)
+                continue
+            core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", q.split(",")[0]).strip().lower()
+            qtoks = {t for t in re.split(r"[\s,.&'-]+", core)
+                     if len(t) >= 4 and t not in _ADDR_GENERIC and not t.isdigit()}
+            if qtoks and not any(t in disp.lower() for t in qtoks):
+                logging.info("geocode: rejected wrong-street hit: %s -> %s", q, disp)
+                await asyncio.sleep(1.1)
+                continue
+            county = str(ad.get("county", ""))
+            locality = str(ad.get("village") or ad.get("town") or ad.get("city")
+                           or ad.get("hamlet") or ad.get("borough") or "")
             lat = lon = None
             try:
                 lat, lon = float(res[0].get("lat")), float(res[0].get("lon"))
             except (TypeError, ValueError):
                 pass
-            return True, ("Sullivan" in county or "Sullivan County" in disp), disp, lat, lon
+            return True, ("Sullivan" in county or "Sullivan County" in disp), disp, lat, lon, locality
         await asyncio.sleep(1.1)  # nominatim 1 req/s
-    return False, False, "", None, None
+    return False, False, "", None, None, ""
 
 
 async def _cross_streets(lat: float, lon: float, address: str) -> tuple:
@@ -318,11 +347,52 @@ async def _cross_streets(lat: float, lon: float, address: str) -> tuple:
     return None, False
 
 
+RECENT_FILE = Path(os.environ.get("RECENT_FILE", "./segments/recent_posts.json"))
+_INCIDENT_DEDUP_SEC = 600
+_ADDR_GENERIC = {"street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd",
+                 "place", "pl", "drive", "dr", "lane", "ln", "parkway", "pkwy", "court",
+                 "ct", "east", "west", "north", "south", "ny", "brooklyn", "new", "york",
+                 "queens", "manhattan", "bronx", "and", "the", "between", "county", "co"}
+
+
+def _rare_tokens(addr: str) -> set:
+    return {t for t in re.split(r"[\s,.&'-]+", addr.lower())
+            if len(t) >= 4 and t not in _ADDR_GENERIC and not t.isdigit()}
+
+
+def _load_recent() -> list:
+    try:
+        data = json.loads(RECENT_FILE.read_text())
+        now = time.time()
+        return [r for r in data if now - r.get("t", 0) < _INCIDENT_DEDUP_SEC]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _save_recent(rows: list) -> None:
+    try:
+        RECENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RECENT_FILE.write_text(json.dumps(rows[-50:]))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None) -> str:
     """User's posting rules (9/28): verified addresses only; Sullivan feed posts
     only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
     Returns 'sent' | 'queued' | 'suppressed'."""
     text_out = format_alert(hit)
+    now = time.time()
+    nat_norm = (hit.get("nature") or "").strip().lower()
+    toks = _rare_tokens(hit["address"])
+    if nat_norm and toks:
+        for r in _load_recent():
+            if r.get("nature") == nat_norm and toks & set(r.get("tokens") or []):
+                logging.info("[%s] suppressed (duplicate incident): %s @ %s",
+                             profile, hit["nature"], hit["address"])
+                stats.event(profile, f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
+                ops_log(f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
+                return "suppressed"
     if re.match(r"^FDNY Box \d+", hit["address"]):
         logging.info("[%s] suppressed (bare box, no street address): %s", profile, hit["address"])
         stats.event(profile, f"suppressed (bare box): {hit['address']}")
@@ -340,8 +410,17 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         return "suppressed"
     verified_label = ""
     lat = lon = None
+    locality = ""
     if GEOCODE_VERIFY:
-        verified, in_sullivan, verified_label, lat, lon = await geocode_verify(hit["address"], profile)
+        verified, in_sullivan, verified_label, lat, lon, locality = await geocode_verify(hit["address"], profile)
+        if (verified and locality and profile.lower().startswith(("hatzalah", "zello-hatzalah"))
+                and locality.lower() not in ("brooklyn", "queens", "manhattan", "bronx", "new york")):
+            fixed = re.sub(r",\s*[^,]+,\s*NY$", f", {locality}, NY", hit["address"])
+            if fixed != hit["address"]:
+                logging.info("[%s] area corrected by geocode: %s -> %s", profile, hit["address"], fixed)
+                stats.event(profile, f"area corrected: {hit['address']} -> {fixed}")
+                text_out = text_out.replace(hit["address"], fixed, 1)
+                hit["address"] = fixed
         if profile == "sullivan" and verified and not in_sullivan:
             logging.info("[%s] suppressed (verified outside Sullivan Co): %s", profile, hit["address"])
             stats.event(profile, f"suppressed (outside Sullivan Co): {hit['nature']} @ {hit['address']}")
@@ -381,6 +460,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     if not ok:
         ops_log(f"ALERT POST FAILED: {hit['nature']} @ {hit['address']}")
         return "queued"
+    if nat_norm and toks:
+        recent = _load_recent()
+        recent.append({"t": now, "nature": nat_norm, "tokens": sorted(toks)})
+        _save_recent(recent)
     if clip_name:
         ogg = await asyncio.to_thread(_ensure_ogg, clip_name)
         if ogg:
@@ -474,7 +557,7 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
             _save_seen(seen)
             outcome = await verify_and_send(profile, hit, stats, clip_name)
             ok = outcome == "sent"
-            stats.mark_alert(profile, hit["nature"], hit["address"], ok)
+            stats.mark_alert(profile, hit["nature"], hit["address"], ok, failed=(outcome == "queued"))
             _append_alert_log({"t": now, "feed": profile, "nature": hit["nature"],
                                "address": hit["address"], "sent": ok,
                                "excerpt": hit["excerpt"]})
@@ -551,7 +634,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
     _save_seen(seen)
     outcome = await verify_and_send("fdny", hit, stats, clip_name)
     ok = outcome == "sent"
-    stats.mark_alert("fdny", hit["nature"], hit["address"], ok)
+    stats.mark_alert("fdny", hit["nature"], hit["address"], ok, failed=(outcome == "queued"))
     _append_alert_log({"t": now, "feed": "fdny", "nature": hit["nature"],
                        "address": hit["address"], "sent": ok,
                        "excerpt": hit["excerpt"]})
