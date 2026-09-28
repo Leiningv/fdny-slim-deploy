@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -97,6 +98,83 @@ def _save_seen(seen: dict) -> None:
         logging.warning("seen save failed: %s", e)
 
 
+
+GEOCODE_VERIFY = os.environ.get("GEOCODE_VERIFY", "1") != "0"
+
+
+_GEOCODE_ABBREV = {"Ave": "Avenue", "St": "Street", "Rd": "Road", "Blvd": "Boulevard",
+                   "Pkwy": "Parkway", "Dr": "Drive", "Ln": "Lane", "Ct": "Court", "Pl": "Place"}
+
+
+def _geocode_variants(addr: str, profile: str) -> list[str]:
+    """Query rewrites: expand abbreviations; '14th Ave between 50th & 51st St' ->
+    '14th Avenue & 51st Street'; locality hints per feed."""
+    base = addr if ", NY" in addr else f"{addr}, NY"
+    street, _, tail = base.partition(",")
+    for a, b in _GEOCODE_ABBREV.items():
+        street = re.sub(rf"\b{a}\b", b, street)
+    import re as _re
+    m = _re.search(r"(.+?)\s+between\s+(.+?)\s*&\s*(.+)", street)
+    variants = []
+    if m:
+        variants.append(f"{m.group(1).strip()} & {m.group(3).strip()}{',' + tail if tail else ''}")
+        variants.append(f"{m.group(1).strip()} & {m.group(2).strip()}{',' + tail if tail else ''}")
+    variants.append(street + ("," + tail if tail else ""))
+    if profile == "sullivan":
+        variants.append(f"{street}, Sullivan County, NY")
+        variants.append(f"{street}, Monticello, NY")
+    return [v for i, v in enumerate(variants) if v not in variants[:i]]
+
+
+async def _nominatim(q: str):
+    import urllib.parse
+    import aiohttp
+    url = ("https://nominatim.openstreetmap.org/search?" +
+           urllib.parse.urlencode({"q": q, "format": "json", "limit": 1, "addressdetails": 1}))
+    try:
+        async with aiohttp.ClientSession(
+                headers={"User-Agent": "fdny-slim/1.0 dispatch monitor"}) as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    return None
+                return await r.json()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def geocode_verify(addr: str, profile: str = "") -> tuple[bool, bool]:
+    """Verify an address against OpenStreetMap Nominatim (free, no key).
+    Returns (verified, in_sullivan_county). Fails open as (False, False)."""
+    for q in _geocode_variants(addr, profile):
+        res = await _nominatim(q)
+        if res is None:
+            return False, False  # network/API failure: don't burn retries
+        if res:
+            disp = str(res[0].get("display_name", ""))
+            county = str((res[0].get("address") or {}).get("county", ""))
+            return True, ("Sullivan" in county or "Sullivan County" in disp)
+        await asyncio.sleep(1.1)  # nominatim 1 req/s
+    return False, False
+
+
+async def verify_and_send(profile: str, hit: dict, stats) -> str:
+    """User's posting rules (9/28): verified addresses only; Sullivan feed posts
+    only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
+    Returns 'sent' | 'queued' | 'suppressed'."""
+    text_out = format_alert(hit)
+    if GEOCODE_VERIFY:
+        verified, in_sullivan = await geocode_verify(hit["address"], profile)
+        if profile == "sullivan" and verified and not in_sullivan:
+            logging.info("[%s] suppressed (verified outside Sullivan Co): %s", profile, hit["address"])
+            stats.event(profile, f"suppressed (outside Sullivan Co): {hit['nature']} @ {hit['address']}")
+            return "suppressed"
+        if not verified:
+            text_out = text_out.replace(hit["address"], hit["address"] + " (not confirmed)", 1)
+            stats.event(profile, f"unconfirmed address: {hit['address']}")
+    ok = await alert_waha.send_text(text_out)
+    return "sent" if ok else "queued"
+
+
 def format_alert(hit: dict) -> str:
     now = datetime.now(NY).strftime("%-m/%-d %-I:%M %p")
     label = SOURCE_LABEL.get(hit["source"], hit["source"])
@@ -176,7 +254,8 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
                 continue
             seen[key] = now
             _save_seen(seen)
-            ok = await alert_waha.send_text(format_alert(hit))
+            outcome = await verify_and_send(profile, hit, stats)
+            ok = outcome == "sent"
             stats.mark_alert(profile, hit["nature"], hit["address"], ok)
             _append_alert_log({"t": now, "feed": profile, "nature": hit["nature"],
                                "address": hit["address"], "sent": ok,
@@ -252,7 +331,8 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path) -> 
         return
     seen[key] = now
     _save_seen(seen)
-    ok = await alert_waha.send_text(format_alert(hit))
+    outcome = await verify_and_send("fdny", hit, stats)
+    ok = outcome == "sent"
     stats.mark_alert("fdny", hit["nature"], hit["address"], ok)
     _append_alert_log({"t": now, "feed": "fdny", "nature": hit["nature"],
                        "address": hit["address"], "sent": ok,
