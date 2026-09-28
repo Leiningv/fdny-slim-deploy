@@ -169,81 +169,126 @@ def _html(snap: dict) -> str:
     def esc(x):
         return html.escape(str(x))
 
+    feed_labels = {
+        "fdny": "FDNY Brooklyn dispatch (Calls)",
+        "zello-hatzalah": "Zello TSL-ChevraHatzalah (24/7)",
+        "zello-sullivan": "Zello Sullivan County (24/7, dedicated account)",
+    }
+    order = [n for n in ("fdny", "zello-hatzalah", "zello-sullivan") if n in snap["feeds"]]
+    order += sorted(n for n in snap["feeds"] if n not in order)
+
     feed_rows = []
-    for name, f in snap["feeds"].items():
-        state = '<span class="ok">RECORDING</span>' if f["ffmpeg_running"] else '<span class="bad">DOWN</span>'
+    for name in order:
+        f = snap["feeds"][name]
+        if f["ffmpeg_running"]:
+            state = '<td class="ok">&#9632; RECORDING</td>'
+        else:
+            state = '<td class="bad">&#9632; DOWN</td>'
         feed_rows.append(
-            f"<tr><td>{esc(name)}</td><td>{state}</td>"
-            f"<td>{f['segments_seen']}</td><td>{f['transcripts']}</td>"
-            f"<td>{f['ffmpeg_restarts']}</td>"
-            f"<td>{_fmt_age(f['last_segment_age_sec'])}</td>"
-            f"<td>{esc(f['last_transcript'][:140])}</td>"
-            f"<td>{esc(f['last_alert'][:80])}</td></tr>")
+            f'<tr><td class="mono">{esc(name)}</td>'
+            f'<td>{esc(feed_labels.get(name, name))}</td>{state}'
+            f'<td class="num">{f["segments_seen"]}</td>'
+            f'<td class="num">{f["transcripts"]}</td>'
+            f'<td class="num">{f["ffmpeg_restarts"]}</td>'
+            f'<td class="dim">{_fmt_age(f["last_segment_age_sec"])}</td>'
+            f'<td class="heard">{esc(f["last_transcript"][:160])}</td></tr>')
+    feeds_html = "".join(feed_rows) or '<tr><td colspan="8" class="dim">no feeds registered yet</td></tr>'
 
     if snap["alert_log"]:
-        alert_rows = "".join(
-            f"<tr><td>{_fmt_age(a['age_sec'])}</td><td>{esc(a['feed'])}</td>"
-            f"<td>{esc(a['nature'])}</td><td>{esc(a['address'])}</td>"
-            f"<td>{esc(a.get('outcome') or ('sent' if a['sent'] else 'FAILED'))}</td></tr>"
-            for a in snap["alert_log"])
+        alert_rows = []
+        for a in snap["alert_log"]:
+            outcome = (a.get("outcome") or ("sent" if a["sent"] else "failed")).upper()
+            cls = "ok" if a["sent"] else ("bad" if outcome == "FAILED" else "warn")
+            alert_rows.append(
+                f'<tr><td class="dim">{_fmt_age(a["age_sec"])}</td>'
+                f'<td class="mono">{esc(a["feed"])}</td>'
+                f'<td>{esc(a["nature"] or "-")}</td>'
+                f'<td>{esc(a["address"])}</td>'
+                f'<td class="{cls}">{esc(outcome)}</td></tr>')
+        alerts_html = "".join(alert_rows)
     else:
-        alert_rows = '<tr><td colspan="5" class="dim">no dispatch alerts yet this run</td></tr>'
+        alerts_html = '<tr><td colspan="5" class="dim">no dispatch alerts yet this run</td></tr>'
 
     if snap["clips"]:
-        clip_items = "".join(
-            f"<tr><td>{_fmt_age(c['age_sec'])}</td><td>{esc(c['feed'])}</td>"
+        clip_rows = "".join(
+            f'<tr><td class="dim">{_fmt_age(c["age_sec"])}</td>'
+            f'<td class="mono">{esc(c["feed"])}</td>'
             f'<td><audio controls preload="none" src="{esc(c["url"])}"></audio></td>'
-            f"<td class=\"dim\">{esc(c['transcript'][:120])}</td></tr>"
+            f'<td class="heard">{esc(c["transcript"][:140])}</td></tr>'
             for c in snap["clips"])
     else:
-        clip_items = '<tr><td colspan="4" class="dim">no speech captured yet this run - clips appear here the first time a feed talks</td></tr>'
+        clip_rows = ('<tr><td colspan="4" class="dim">no speech captured yet this run'
+                     ' - clips appear here the first time a feed talks</td></tr>')
+
+    ev_rows = "".join(
+        f'<tr><td class="dim">{_fmt_age(e["age_sec"])}</td>'
+        f'<td class="mono">{esc(e["feed"])}</td>'
+        f'<td>{esc(e["msg"])}</td></tr>'
+        for e in snap["recent_events"]) or '<tr><td colspan="3" class="dim">no events yet</td></tr>'
 
     import transcribe as _tr
-    engine = "AssemblyAI universal-3-pro + keyterm boost (local whisper fallback)" if _tr.AAI_KEY else "local whisper (faster-whisper)"
+    engine = ("assemblyai universal-3-pro + keyterm boost (local whisper fallback)"
+              if _tr.AAI_KEY else "local whisper (faster-whisper)")
     queued = snap["alerts_failed"] if snap["waha_session"] != "WORKING" else 0
 
-    evs = "".join(
-        f"<li>[{esc(e['feed'])}] {esc(e['msg'])} <span class=dim>({_fmt_age(e['age_sec'])})</span></li>"
-        for e in snap["recent_events"])
+    feeds_down = any(not f["ffmpeg_running"] for f in snap["feeds"].values())
+    degraded = feeds_down or snap["waha_session"] != "WORKING"
+    status_word = "DEGRADED" if degraded else "OPERATIONAL"
+    status_cls = "warn" if degraded else "ok"
+    waha_cls = "ok" if snap["waha_session"] == "WORKING" else "bad"
+    hdr_border = "#c9a44a" if degraded else "#5fb96e"
+    uptime_m = int(snap["uptime_sec"] // 60)
+    uptime = f"{uptime_m}m" if uptime_m < 180 else f"{uptime_m // 60}h{uptime_m % 60:02d}m"
 
-    return f"""<!doctype html><meta charset=utf-8>
+    return f"""<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta http-equiv=refresh content=60>
-<title>fdny-slim dispatch monitor</title>
+<title>FDNY-SLIM DISPATCH MONITOR</title>
 <style>
-body{{font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;background:#fff;color:#111;padding:16px;max-width:1000px;margin:auto}}
-h1{{font-size:15px;margin:0 0 2px}} h2{{font-size:13px;margin:18px 0 6px;text-transform:uppercase;letter-spacing:.5px}}
-table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #999;padding:3px 8px;text-align:left;vertical-align:top}}
-th{{background:#eee}}
-.ok{{font-weight:700}} .bad{{color:#b00;font-weight:700}} .dim{{color:#666}}
-audio{{height:28px;width:220px}}
-ul{{margin:0;padding-left:18px}} li{{margin:2px 0}}
-.bar{{border:1px solid #999;background:#eee;padding:6px 10px;margin:8px 0}}
-</style>
-<h1>fdny-slim &mdash; dispatch monitor</h1>
-<div class="bar">
-status: <span class="ok">LIVE</span> &middot; uptime {int(snap['uptime_sec'] // 60)}m
-&middot; commit {esc(snap['git_commit'] or '?')}
-&middot; WAHA session: <b>{esc(snap['waha_session'])}</b>
-&middot; alerts sent {snap['alerts_sent']} (failed {snap['alerts_failed']})
-<br>feeds: Zello TSL-ChevraHatzalah (24/7) &middot; Zello Sullivan County (24/7, dedicated account) &middot; FDNY Brooklyn dispatch (Calls)
-<br>posting: option-1 layout &middot; box numbers verified vs fdnewyork.com &middot; map-canonical street spelling
-&middot; freshness gate (live &le;5m, Calls &le;10m) &middot; same-second text+voice note &middot; ops log &rarr; FD SYSTEM UPDATES
-<br>transcription: <b>{engine}</b> &middot; alerts queued (WAHA down): {queued}
-&middot; auto-refresh 60s
+*{{box-sizing:border-box;border-radius:0!important}}
+body{{background:#15171b;color:#d6d8db;font:12px/1.45 Arial,Helvetica,sans-serif;margin:0;padding:18px 22px}}
+h1{{font-size:15px;letter-spacing:3px;font-weight:700;margin:0;color:#e8e9eb}}
+.sub{{color:#7c828b;font-size:11px;letter-spacing:1px}}
+table{{border-collapse:collapse;width:100%;margin:4px 0 16px}}
+th{{text-align:left;font-size:10px;letter-spacing:2px;color:#82888f;border-bottom:1px solid #3a3e45;padding:3px 8px 3px 0;font-weight:600}}
+td{{border-bottom:1px solid #262a30;padding:4px 8px 4px 0;vertical-align:top}}
+.sec{{font-size:10px;letter-spacing:3px;color:#82888f;border-bottom:2px solid #3a3e45;margin:18px 0 2px;padding-bottom:3px}}
+.mono{{font-family:'Courier New',monospace;font-size:11px}}
+.num{{font-family:'Courier New',monospace;text-align:right;padding-right:14px}}
+.ok{{color:#5fb96e}} .warn{{color:#c9a44a}} .bad{{color:#c05046}} .dim{{color:#6d737c}} .heard{{color:#a6abb3;font-size:11px}}
+.hdr{{border:1px solid #3a3e45;border-left:6px solid {hdr_border};padding:10px 14px;margin-bottom:14px}}
+.hdr table td{{border:0;padding:1px 26px 1px 0}}
+.kv b{{color:#e8e9eb}}
+.rules{{color:#a6abb3;font-size:11px;margin-top:2px}}
+audio{{height:22px;width:190px}}
+</style></head><body>
+<div class=hdr><h1>FDNY-SLIM &nbsp;DISPATCH MONITOR</h1>
+<div class=sub>BROOKLYN DISPATCH WATCH &middot; CITY OF NEW YORK FIRE CHANNELS</div>
+<table class=kv><tr>
+<td>STATUS <b class={status_cls}>&#9632; {status_word}</b></td>
+<td>UPTIME <b>{uptime}</b></td>
+<td>BUILD <b class=mono>{esc(snap['git_commit'] or '?')}</b></td>
+<td>WHATSAPP LINK <b class={waha_cls}>{esc(snap['waha_session'])}</b></td>
+<td>ALERTS POSTED <b>{snap['alerts_sent']}</b></td>
+<td>FAILED <b>{snap['alerts_failed']}</b></td>
+<td>QUEUED <b>{queued}</b></td>
+</tr></table>
+<div class=rules>POSTING RULES &nbsp; option-1 layout &nbsp;|&nbsp; box numbers verified vs fdnewyork.com &nbsp;|&nbsp; map-canonical street spelling &nbsp;|&nbsp; freshness gate (live &le;5m, Calls &le;10m) &nbsp;|&nbsp; same-second text+voice note &nbsp;|&nbsp; ops log -&gt; FD SYSTEM UPDATES</div>
 </div>
-<h2>feeds</h2>
-<table><tr><th>feed</th><th>capture</th><th>segments</th><th>transcripts</th><th>restarts</th><th>last audio</th><th>last thing heard</th><th>last alert</th></tr>
-{''.join(feed_rows)}</table>
-<h2>job / alert log</h2>
-<table><tr><th>when</th><th>feed</th><th>nature</th><th>address</th><th>whatsapp</th></tr>
-{alert_rows}</table>
-<h2>recent feed audio</h2>
-<table><tr><th>when</th><th>feed</th><th>play</th><th>transcript</th></tr>
-{clip_items}</table>
-<h2>event log</h2>
-<ul>{evs}</ul>
-<p class="dim"><a href="/status">/status JSON</a> &middot; <a href="/health">/health</a> &middot; operated by Instinct</p>"""
+<div class=sec>FEEDS</div><table>
+<tr><th>ID</th><th>CHANNEL</th><th>CAPTURE</th><th>SEG</th><th>TRX</th><th>RST</th><th>LAST AUDIO</th><th>LAST HEARD</th></tr>
+{feeds_html}</table>
+<div class=sec>JOB / ALERT LOG</div><table>
+<tr><th>WHEN</th><th>FEED</th><th>NATURE</th><th>ADDRESS</th><th>RESULT</th></tr>
+{alerts_html}</table>
+<div class=sec>RECENT FEED AUDIO</div><table>
+<tr><th>WHEN</th><th>FEED</th><th>PLAY</th><th>TRANSCRIPT</th></tr>
+{clip_rows}</table>
+<div class=sec>EVENT LOG</div><table>
+<tr><th>WHEN</th><th>FEED</th><th>EVENT</th></tr>
+{ev_rows}</table>
+<div class=dim style="font-size:10px">{esc(engine)} &middot; auto-refresh 60s &middot; <a href="/status" style="color:#6d737c">/status JSON</a> &middot; operated by Instinct</div>
+</body></html>"""
 
 
 async def _health(_req: web.Request) -> web.Response:
