@@ -420,6 +420,64 @@ def _canon_name(name: str, pool: set) -> str:
     return name
 
 
+BOX_CACHE_FILE = SEG_DIR / "box_cache.json"
+
+
+def _load_box_cache() -> dict:
+    try:
+        return json.loads(BOX_CACHE_FILE.read_text())
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_box_cache(c: dict) -> None:
+    try:
+        BOX_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        BOX_CACHE_FILE.write_text(json.dumps(c))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _box_lookup(box4: str) -> list:
+    """FDNY box -> location rows from fdnewyork.com/getbox.asp (the user's named
+    source). Boxes are per-borough; returns [(location, borough), ...].
+    Cached forever on disk - box geography is static, so each unique box costs
+    the site exactly one request."""
+    import urllib.parse
+    import urllib.request
+    cache = _load_box_cache()
+    if box4 in cache:
+        return [tuple(r) for r in cache[box4]]
+    rows: list = []
+    try:
+        data = urllib.parse.urlencode({"action": "Save Form Data", "id": box4}).encode()
+        req = urllib.request.Request(
+            "https://www.fdnewyork.com/getbox.asp", data=data,
+            headers={"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"})
+
+        def _fetch():
+            with urllib.request.urlopen(req, timeout=12) as r:
+                return r.read().decode("utf-8", "replace")
+
+        html_txt = await asyncio.to_thread(_fetch)
+        for m in re.finditer(
+                r"<td class=\w+>(\d{4})</td><td class=\w+>([^<]+)</td><td class=\w+>\s*([^<]+?)\s*</td>",
+                html_txt):
+            if m.group(1) == box4:
+                rows.append((m.group(2).strip(), m.group(3).strip()))
+    except Exception as e:  # noqa: BLE001
+        logging.warning("box lookup failed for %s: %s", box4, e)
+        return []
+    cache[box4] = rows
+    _save_box_cache(cache)
+    return rows
+
+
+def _heard_box(excerpt: str) -> str | None:
+    m = re.search(r"\bbox\s+(\d{1,4})\b", excerpt or "", re.I)
+    return m.group(1).zfill(4) if m else None
+
+
 RECENT_FILE = Path(os.environ.get("RECENT_FILE", "./segments/recent_posts.json"))
 _INCIDENT_DEDUP_SEC = 600
 _ADDR_GENERIC = {"street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd",
@@ -490,6 +548,11 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         stats.event(profile, f"suppressed (Fall excluded): {hit['address']}")
         ops_log(f"suppressed (Fall excluded): {hit['address']}")
         return "suppressed"
+    box_task = None
+    if not profile.lower().startswith(("sullivan", "zello-sullivan")):
+        heard = _heard_box(hit.get("excerpt") or "")
+        if heard:
+            box_task = asyncio.create_task(_box_lookup(heard))
     ogg_task = None
     if clip_name:
         # Convert the voice note concurrently with geocode/canonicalization so
@@ -557,7 +620,29 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 colony = scol.match_sullivan_colony(hit.get("excerpt") or "")
         except Exception as e:  # noqa: BLE001
             logging.warning("colony match failed: %s", e)
-    text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony)
+    box_disp = ""
+    if box_task is not None:
+        try:
+            rows = await box_task
+        except Exception:  # noqa: BLE001
+            rows = []
+        heard = _heard_box(hit.get("excerpt") or "")
+        if rows and heard:
+            toks = _rare_tokens(f"{hit['address']} {cross} {verified_label}")
+            for loc, borough in rows:
+                if _rare_tokens(loc) & toks:
+                    box_disp = heard
+                    break
+            if not box_disp:
+                logging.info("[%s] box mismatch: heard Box %s, lookup %s", profile, heard, rows)
+                stats.event(profile, f"box mismatch (not posted): heard {heard}, lookup "
+                            + "; ".join(f"{l} ({b})" for l, b in rows))
+                ops_log(f"box mismatch (not posted): heard Box {heard} @ {hit['address']}, "
+                        f"lookup: " + "; ".join(f"{l} ({b})" for l, b in rows))
+        elif heard:
+            logging.info("[%s] box %s not in lookup DB - not posted", profile, heard)
+            stats.event(profile, f"box {heard} not in lookup DB (not posted)")
+    text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony, box=box_disp)
     ogg = None
     if ogg_task is not None:
         try:
@@ -584,7 +669,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
 
 
 def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
-                 footer: str | None = None) -> str:
+                 footer: str | None = None, box: str = "") -> str:
     """User-picked layout (9/28, option 1): bold caps nature header with fire
     emoji; bold pinned address; plain 'between X & Y' crosses line; time;
     italic source footer at the very bottom. No transcript quote, ever.
@@ -597,6 +682,8 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     lines = [f"*\N{FIRE} {nature}*", "", addr_line]
     if crosses:
         lines.append(f"between {crosses}")
+    if box:
+        lines.append(f"\N{PAGER} Box {box}")
     lines += ["", f"\N{CLOCK FACE ONE OCLOCK} {now}"]
     label = footer or SOURCE_LABEL.get(hit["source"], hit["source"])
     lines.append(f"_{label}_")
