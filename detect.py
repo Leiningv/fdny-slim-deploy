@@ -1156,4 +1156,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                        if re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I) else "",
         "priority": is_priority(t),
         "cross": cross,
-}
+    }
