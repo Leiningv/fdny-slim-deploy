@@ -1184,7 +1184,14 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                    r"seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th))\s+floor)\b", t)
     if fl and nature and fl.group(1).lower() not in nature.lower():
         nature = f"{nature}, {_addr_title(fl.group(1))}"
+    # Dispatcher's explicit "time now is 1610" is a clock readout, not a
+    # box/house/unit number; preserve it separately from the audio timestamp.
+    spoken_time = ""
+    tm = re.search(r"\btime\s+(?:now\s+)?(?:is\s+)?(?:at\s+)?([01]\d|2[0-3])([0-5]\d)\b", t, re.I)
+    if tm:
+        spoken_time = f"{tm.group(1)}:{tm.group(2)}"
     return {
+        "spoken_time": spoken_time,
         "source": source,
         "nature": nature,
         "apartment": apt if profile != "fdny" else "",
