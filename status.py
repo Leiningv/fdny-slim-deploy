@@ -19,6 +19,7 @@ import html
 import json
 import logging
 import os
+import secrets
 import re
 import threading
 import time
@@ -445,6 +446,7 @@ def _dispatch_control_html(snap: dict) -> str:
     <section class="panel"><div class="head">EXCLUSIONS / WATCHES</div><div class="body"><div id="lists"></div><button type="button" class="button" data-edit="1">Edit lists</button><p class="muted">Review changes before saving. Old alerts are unchanged.</p></div></section>
     <section class="panel"><div class="head">MORE CONTROLS / CHANGE REVIEW</div><div class="body"><div class="field">Feed switches and capture health <button type="button" class="button" data-edit="1">Manage</button></div><div class="field">Exclusions by nature <button type="button" class="button" data-edit="1">Manage</button></div><div class="field">Watch terms to ops group <button type="button" class="button" data-edit="1">Manage</button></div><div class="field">Held review / audio <a href="#held" class="button">View</a></div><div class="field">Freshness and verification gates <span class="muted">READ ONLY</span></div><button type="button" class="button warn" data-edit="1">Review proposed changes</button></div></section>
     <section class="panel" id="events"><div class="head">EVENT LOG</div><div class="body" id="event-rows"></div></section></aside></div>
+    <section class="panel"><div class="head">ONE-TIME TEST ALERT</div><div class="body"><p>Send a clearly marked test to the configured alert group. No incident details, no replay.</p><form method="post" action="test-send"><input type="hidden" name="nonce" value="" id="test-nonce"><label>Exact message<input name="text" value="TEST ALERT" maxlength="64" required></label><button class="button warn" type="submit">Send test to alert group</button></form></div></section>
     <section id="edit-panel" class="panel controls"><div class="head">EDIT EXISTING CONTROLS</div><div class="body"><form id="edit-form" method="post" action="set"><label>Excluded Hatzalah natures, comma-separated<input class="control-input" name="excluded_natures" id="excluded" type="text"></label><label>Ops keyword watches, comma-separated<input class="control-input" name="keyword_watches" id="watches" type="text"></label><p>Mute alert posting (recording continues):</p><label><input class="control-input" type="checkbox" name="mute_fdny"> FDNY Calls</label><label><input class="control-input" type="checkbox" name="mute_zello-hatzalah"> Hatzalah Zello</label><label><input class="control-input" type="checkbox" name="mute_zello-sullivan"> Sullivan Zello</label><p class="muted">The review step shows the exact changed values. No historical alert is reposted or deleted.</p><button type="button" class="button warn" id="review-button">Review proposed changes</button></form></div></section>
     <div class="review" id="review" role="dialog" aria-modal="true" aria-label="Review control changes"><div class="panel"><h2>Review changes</h2><div id="diff"></div><p>Only changed existing controls will be saved. Recording continues; no held call is posted.</p><div class="actions"><button class="button" type="button" id="cancel">Back</button><button class="button warn" type="button" id="confirm">Save these changes</button></div></div></div>
     <div class="foot">Live operational data; recent clips and alert history are bounded. Never use for emergency dispatch.</div></main>
@@ -672,6 +674,8 @@ def make_app(stats: Stats) -> web.Application:
         return web.FileResponse(path, headers={"Content-Type": ct})
 
     app = web.Application()
+    test_nonce = secrets.token_urlsafe(24)
+    test_sent = False
     async def diag(req: web.Request) -> web.Response:
         # temporary egress diagnostic: GET /diag?u=<url> -> upstream status + body head
         import urllib.request, urllib.error
@@ -748,7 +752,11 @@ def make_app(stats: Stats) -> web.Application:
     async def archive_page(req: web.Request) -> web.Response:
         if not _ctl_ok(req):
             raise web.HTTPNotFound()
-        return web.Response(text=_dispatch_control_html(stats.snapshot()), content_type="text/html")
+        page = _dispatch_control_html(stats.snapshot())
+        page = page.replace('value="" id="test-nonce"',
+                            'value="' + test_nonce + '" id="test-nonce"', 1)
+        return web.Response(text=page, content_type="text/html",
+                            headers={"Cache-Control": "no-store"})
 
     async def archive_history(req: web.Request) -> web.Response:
         if not _ctl_ok(req):
@@ -761,6 +769,34 @@ def make_app(stats: Stats) -> web.Application:
         if not _ctl_ok(req):
             raise web.HTTPNotFound()
         return web.Response(text=_control_html(), content_type="text/html")
+
+    async def test_send(req: web.Request) -> web.Response:
+        nonlocal test_sent
+        if not _ctl_ok(req):
+            raise web.HTTPNotFound()
+        origin = req.headers.get("Origin", "")
+        if origin != str(req.url.origin()):
+            raise web.HTTPForbidden(text="same-origin form required")
+        d = await req.post()
+        if not hmac.compare_digest(str(d.get("nonce", "")), test_nonce):
+            raise web.HTTPForbidden(text="invalid test form")
+        # This emergency-alert group must never receive arbitrary incident text
+        # through a manual route. Limit this one-off to an unmistakable label.
+        if str(d.get("text", "")) != "TEST ALERT":
+            raise web.HTTPBadRequest(text="only TEST ALERT is allowed")
+        if test_sent:
+            raise web.HTTPConflict(text="test already submitted this run")
+        import alert_waha
+        if not alert_waha.configured() or stats.waha_status != "WORKING":
+            raise web.HTTPServiceUnavailable(text="alert delivery unavailable")
+        test_sent = True  # fail closed on retries, including an ambiguous timeout
+        delivered = await alert_waha.send_text("TEST ALERT", chat_id=alert_waha._chat())
+        stats.event("system", "manual TEST ALERT delivery " + ("accepted" if delivered else "failed"))
+        if not delivered:
+            raise web.HTTPBadGateway(text="test delivery failed; no automatic retry")
+        return web.Response(text="TEST ALERT accepted by WAHA for the configured alert group."
+                                 " This does not prove receipt on every member's phone.",
+                            headers={"Cache-Control": "no-store"})
 
     async def control_set(req: web.Request) -> web.Response:
         if not _ctl_ok(req):
@@ -837,6 +873,7 @@ def make_app(stats: Stats) -> web.Application:
     app.router.add_get("/c/{token}/history", archive_history)
     app.router.add_get("/c/{token}/settings", control_page)
     app.router.add_post("/c/{token}/set", control_set)
+    app.router.add_post("/c/{token}/test-send", test_send)
     app.router.add_get("/health", _health)
     app.router.add_get("/diag", diag)
     app.router.add_post("/hls", hls_push)
