@@ -1018,12 +1018,18 @@ def get_nature(text: str, profile: str = "") -> str:
         mp = re.search(r"\b(ruptured|struck|hit|broken|leaking|leak)\b",
                        t[m_gas.end(): m_gas.end() + 40])
         return _addr_title("gas main " + mp.group(1)) if mp else "Gas Main"
+    # Alarm activation is not evidence of an actual fire. Preserve the
+    # spoken alarm nature, unless a specific fire complaint above won first.
+    v = vt(r"\b(?:activated\s+(?:fire\s+)?alarm|fire\s+alarm\s+activation)\b")
+    if v: return v
     # bare-word fire fallback is FDNY-only: on the EMS channel a lone whisper
     # 'fire' is a hallucination until proven ('I can't have fake coming thru'
     # 9/28) - Hatzalah fire jobs still match the structured patterns above
     if "hatzal" not in profile.lower() and "hatzol" not in profile.lower():
         m = re.search(r"\b(?:fire|smoke|burning)\b(?!\s*—)", t)
-        if m and not _negative_fire_context(t):
+        if m and not _negative_fire_context(t) and not re.search(
+                r"\b(?:activated\s+(?:fire\s+)?alarm|fire\s+alarm\s+activation|"
+                r"(?:fire|smoke|automatic|phone|still)\s+alarm|alarm\s+activation)\b", t):
             return _addr_title(m.group(0))
     # transmission-type fallbacks are LAST RESORT - content natures above
     # always win ('phone alarm... fire in a private dwelling' must post the
