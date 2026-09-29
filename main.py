@@ -25,6 +25,7 @@ import aiohttp
 import alert_waha
 import control
 import detect
+from fdny_correction_guard import CorrectionGuard
 import ingest
 import transcribe
 import zello_ingest
@@ -1278,7 +1279,9 @@ async def _post_held_review(profile: str, hit: dict, clip_name: str | None) -> N
 async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None,
                             fresh_ts: float | None = None,
                             audio_ts: float | None = None, spoken_time: str = "",
-                            send_lock: asyncio.Lock | None = None) -> str:
+                            send_lock: asyncio.Lock | None = None,
+                            correction_guard: CorrectionGuard | None = None,
+                            source_call: dict | None = None) -> str:
     """User's posting rules (9/28): verified addresses only; Sullivan feed posts
     only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
     Returns 'sent' | 'queued' | 'suppressed'."""
@@ -1637,6 +1640,25 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 cross = ""
             if cross:
                 stats.event(profile, f"cross streets (computed): {cross}")
+    # A numbered FDNY address can be sound while the vendor's spoken-cross
+    # transcription is not. Verify each cross independently against actual
+    # street geometry near the exact house; never replace an unverified spoken
+    # block with a nearest map pair (that can describe a different block).
+    if (profile == "fdny" and verified and re.match(r"^\d+[A-Za-z-]*\s+", hit["address"])
+            and cross and "&" in cross and lat is not None and lon is not None):
+        import spoken_cross as crossmap
+        base_road = re.sub(r"^\s*\d+[A-Za-z-]*\s+", "", hit["address"].split(",")[0])
+        sides = [part.strip() for part in cross.split("&", 1)]
+        try:
+            verdicts = await asyncio.gather(*(asyncio.wait_for(
+                crossmap.verify(base_road, side, lat, lon), timeout=10)
+                for side in sides))
+        except Exception:
+            verdicts = [False, False]
+        if not all(verdicts):
+            stats.event(profile, f"unverified spoken FDNY crosses omitted: {cross}")
+            ops_log(f"unverified spoken FDNY crosses omitted: {cross} @ {hit['address']}")
+            cross = ""
     if cross and lat is not None and lon is not None and verified_label \
             and profile.lower().removeprefix("zello-") != "sullivan":
         core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"].split(",")[0]).strip()
@@ -1948,7 +1970,17 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     if send_lock is not None:
         await send_lock.acquire()
     try:
+        if profile == "fdny" and correction_guard is not None and source_call is not None:
+            correction_guard.ingest([])  # expire old correction evidence
+            guard_reason = correction_guard.reason(hit, source_call)
+            if guard_reason:
+                stats.event(profile, f"held ({guard_reason}): {hit['nature']} @ {hit['address']}")
+                ops_log(f"held ({guard_reason}): {hit['nature']} @ {hit['address']}")
+                hit['hold_reason'] = guard_reason
+                return "suppressed"
         ok = await alert_waha.send_text(text_out)
+        if ok and profile == "fdny" and correction_guard is not None:
+            correction_guard.mark_sent(hit)
         text_at = time.monotonic()
         logging.info("[%s] stages verification=%.2fs voice_convert=%.2fs text_send=%.2fs",
                      profile, verified_at-verify_started, ogg_at-verified_at,
@@ -2020,7 +2052,7 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     if hit.get("apartment"):
         lines.append(hit["apartment"])
     if crosses:
-        lines.append(f"BET- {crosses}" if "&" in crosses else f"off {crosses}")
+        lines.append(f"C/s {crosses}" if "&" in crosses else f"off {crosses}")
     if box:
         line = f"Box {box}"
         if box_closest:
@@ -2405,6 +2437,87 @@ async def _fdny_independent_hearing(wav: Path) -> str:
     return ""
 
 
+async def _fdny_recover_held_street(hit: dict, wav: Path, stats: Stats,
+                                    call: dict, clip_name: str,
+                                    send_lock: asyncio.Lock | None = None,
+                                    correction_guard: CorrectionGuard | None = None) -> str:
+    """Bounded Groq second listen for a still-fresh, held exact-house FDNY call.
+
+    Never synthesizes a location from the map. Both readings must agree on
+    the house, box and complaint. The candidate gets the normal sender gates.
+    """
+    if not transcribe.GROQ_ENABLED or not transcribe.GROQ_KEY or not wav.is_file():
+        return "suppressed"
+    try:
+        age = time.time() - float(call.get("ts") or 0)
+    except (TypeError, ValueError):
+        return "suppressed"
+    if not 0 <= age <= FRESH_FDNY_SEC:
+        return "suppressed"
+    from fdny_correction_guard import address_parts
+    old_parts = address_parts(hit.get("address"))
+    if not old_parts or not hit.get("nature") or not hit.get("box_heard"):
+        return "suppressed"
+    second = await asyncio.to_thread(transcribe.second_listen, wav, "fdny")
+    if not second:
+        stats.event("fdny", "held street second listen unavailable; retained hold")
+        return "suppressed"
+    spans = detect.split_dispatch_jobs(second, "fdny")
+    if len(spans) != 1:
+        return "suppressed"
+    candidate = detect.analyze(spans[0], "fdny")
+    new_parts = address_parts((candidate or {}).get("address"))
+    if not new_parts or old_parts[0] != new_parts[0] or old_parts[2] != new_parts[2]:
+        stats.event("fdny", "held street second listen disagreed on house/borough; retained hold")
+        return "suppressed"
+    if (candidate.get("box_heard") != hit.get("box_heard") or
+            candidate.get("nature", "").lower() != hit["nature"].lower()):
+        stats.event("fdny", "held street second listen disagreed on box/complaint; retained hold")
+        return "suppressed"
+    # An independent address is not enough: the house/street must resolve to
+    # the actual mapped house, and both cross roads must share street geometry
+    # near it. For a different vendor street, require a matching spoken cross.
+    verified, _, label, lat, lon, locality = await geocode_verify(candidate["address"], "fdny")
+    from fdny_borough_gate import exact_numbered_fdny_match
+    if not (verified and lat is not None and lon is not None and
+            exact_numbered_fdny_match(candidate["address"], label)):
+        return "suppressed"
+    crosses = [c.strip() for c in (candidate.get("cross") or "").split("&") if c.strip()]
+    if old_parts[1] != new_parts[1]:
+        old_crosses = [c.strip() for c in (hit.get("cross") or "").split("&") if c.strip()]
+        if not crosses or not any(_street_core(c) == _street_core(oc)
+                                  for c in crosses for oc in old_crosses):
+            return "suppressed"
+    if crosses:
+        import spoken_cross as crossmap
+        base = re.sub(r"^\s*\d+[A-Za-z-]*\s+", "", candidate["address"].split(",")[0])
+        checks = await asyncio.gather(*(asyncio.wait_for(
+            crossmap.verify(base, c, lat, lon), timeout=10) for c in crosses),
+            return_exceptions=True)
+        if old_parts[1] != new_parts[1]:
+            # A common verified spoken cross anchors the changed road; the
+            # other ASR cross may be a wrong block, so omit the pair if any
+            # side fails rather than rejecting the exact-house rescue.
+            shared = { _street_core(oc) for oc in old_crosses }
+            if not any(check is True and _street_core(side) in shared
+                       for side, check in zip(crosses, checks)):
+                return "suppressed"
+        if not all(v is True for v in checks):
+            candidate["cross"] = ""
+    # No delayed rescue when the second look has consumed the freshness budget.
+    if time.time() - float(call["ts"]) > FRESH_FDNY_SEC:
+        return "suppressed"
+    # This path repairs a held incident; a prior failed vendor address must
+    # not donate its dedup key. The final sender still checks live freshness,
+    # map, box and correction guard, with sends intercepted in tests.
+    candidate["hold_reason"] = ""
+    return await verify_and_send("fdny", candidate, stats, clip_name,
+                                 fresh_ts=float(call["ts"]),
+                                 audio_ts=float(call.get("audio_start_ts") or call["ts"]),
+                                 send_lock=send_lock, correction_guard=correction_guard,
+                                 source_call=call)
+
+
 async def _fdny_repair_brooklyn_street(hit: dict, wav: Path, stats: Stats,
                                        second: str | None = None) -> None:
     """Narrow local correction of a failed Brooklyn street spelling.
@@ -2606,8 +2719,41 @@ def _fdny_call_record(call: dict, transcript: str, clip_name: str | None,
         logging.error("[fdny] local audit record failed id=%s: %s", call.get("id"), exc)
 
 
+def _fdny_clip_sanity(wav: Path | None, transcript: str) -> str:
+    """Fail closed on an absent, silent, or physically impossible Calls clip.
+
+    This is not semantic concordance: a clear different dispatch can still
+    pass. It prevents a long vendor transcript from riding a tiny/silent file.
+    """
+    if wav is None or not wav.is_file():
+        return "FDNY audio missing"
+    try:
+        import wave
+        with wave.open(str(wav), "rb") as w:
+            duration = w.getnframes() / w.getframerate()
+            rate = w.getframerate()
+            frames = w.readframes(min(w.getnframes(), rate * 15))
+            width = w.getsampwidth()
+        if width != 2:
+            return "FDNY audio unsupported sample width"
+        import array
+        import math
+        samples = array.array("h")
+        samples.frombytes(frames[:len(frames) - len(frames) % 2])
+        rms = int(math.sqrt(sum(v*v for v in samples) / len(samples))) if samples else 0
+    except Exception:
+        return "FDNY audio unreadable"
+    words = len(re.findall(r"\b[\w'-]+\b", transcript))
+    if duration < 2.0 or (words >= 12 and duration < words / 5.0):
+        return f"FDNY transcript/clip duration mismatch ({words} words, {duration:.1f}s)"
+    if rms < 80:
+        return f"FDNY audio silent (rms {rms})"
+    return ""
+
+
 async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
-                            send_lock: asyncio.Lock | None = None) -> None:
+                            send_lock: asyncio.Lock | None = None,
+                            correction_guard: CorrectionGuard | None = None) -> None:
     stats.mark_segment("fdny")
     cid = str(call.get("id") or call.get("filename") or int(time.time()))
     text = (call.get("transcription") or "").strip()
@@ -2636,6 +2782,18 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
     # In particular, ordinary Brooklyn calls must not load small.en just
     # because their address contains a named street.
     fetched_at = time.monotonic()
+    if text:
+        clip_problem = _fdny_clip_sanity(wav, text)
+        if clip_problem:
+            stats.event("fdny", "held: " + clip_problem)
+            ops_log("held: " + clip_problem)
+            if hit:
+                stats.mark_alert("fdny", hit.get("nature", ""), hit.get("address", ""), False,
+                                 failed=False, outcome="suppressed", reason=clip_problem)
+            _fdny_call_record(call, text, None, hit, "suppressed", clip_problem)
+            for suffix in (".m4a", ".wav"):
+                (tmp / f"{cid}{suffix}").unlink(missing_ok=True)
+            return
     if not text and wav is not None:
         text = await asyncio.to_thread(transcribe.transcribe, wav)
         if text:
@@ -2727,6 +2885,25 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             hold_reason = "FDNY street spelling needs independent audio check"
     if hold_reason:
         hit["hold_reason"] = hold_reason
+        # Rescue only the narrow map-failed named-house case, while live.
+        # Other holds (mixed jobs, borough, numbered cross, etc.) stay held.
+        if hold_reason == "FDNY street spelling needs independent audio check" and wav is not None:
+            try:
+                rescue = await _fdny_recover_held_street(
+                    hit, wav, stats, call, clip_name or "", send_lock,
+                    correction_guard)
+            except Exception as exc:  # never turn a recovery error into a send
+                logging.warning("[fdny] held street second listen failed: %s", exc)
+                rescue = "suppressed"
+            if rescue == "sent":
+                stats.event("fdny", f"held street rescued by second listen: {address}")
+                stats.mark_alert("fdny", nature, hit["address"], True,
+                                 outcome="sent", voice_url=hit.get("voice_url", ""))
+                _append_alert_log({"t": now, "feed": "fdny", "nature": nature,
+                                   "address": hit["address"], "sent": True,
+                                   "excerpt": hit["excerpt"]})
+                _fdny_call_record(call, text, clip_name, hit, "sent", "second listen")
+                return
         stats.event("fdny", f"held ({hold_reason}): {nature} @ {address}")
         ops_log(f"held ({hold_reason}): {nature} @ {address}")
         hit["voice_url"] = await _held_recording(clip_name)
@@ -2745,7 +2922,8 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
     verify_start = time.monotonic()
     outcome = await verify_and_send("fdny", hit, stats, clip_name,
                                     fresh_ts=call_ts, audio_ts=audio_start,
-                                    send_lock=send_lock)
+                                    send_lock=send_lock, correction_guard=correction_guard,
+                                    source_call=call)
     logging.info("[fdny] stages id=%s verify_send=%.2fs total=%.2fs outcome=%s",
                  cid, time.monotonic()-verify_start, time.monotonic()-stage_start, outcome)
 
@@ -2773,6 +2951,7 @@ async def fdny_consumer(stats: Stats, seen: dict) -> None:
     tmp = SEG_DIR / "fdny_tmp"
     limit = asyncio.Semaphore(3)
     send_lock = asyncio.Lock()
+    correction_guard = CorrectionGuard()
     active: set = set()
 
     async def worker(call: dict, cid: str, queued_at: float) -> None:
@@ -2784,7 +2963,8 @@ async def fdny_consumer(stats: Stats, seen: dict) -> None:
                 # The shared dedup state stays in the event loop. Each alert
                 # gets its own temp files by cid, with a send lock only at the
                 # final WhatsApp text/voice pair inside verify_and_send.
-                await _fdny_handle_call(call, stats, seen, tmp, send_lock=send_lock)
+                await _fdny_handle_call(call, stats, seen, tmp, send_lock=send_lock,
+                                        correction_guard=correction_guard)
             except Exception as e:  # noqa: BLE001
                 logging.warning("[fdny] worker id=%s failed: %s", cid, e)
 
@@ -2799,11 +2979,26 @@ async def fdny_consumer(stats: Stats, seen: dict) -> None:
                         fh.seek(offset)
                         chunk = fh.read()
                         offset = fh.tell()
+                    valid_calls = []
                     for line in chunk.splitlines():
                         try:
                             call = json.loads(line)
                         except Exception:  # noqa: BLE001
                             continue
+                        if isinstance(call, dict):
+                            valid_calls.append(call)
+                    # Index explicit address corrections for the whole poller
+                    # burst before any of its Calls workers may send.
+                    for box, old_addr, new_addr in correction_guard.ingest(valid_calls):
+                        reason = (f"FDNY correction after sent Box {box}: "
+                                  f"{old_addr} -> {new_addr}; review, no automatic repost")
+                        stats.event("fdny", reason)
+                        logging.warning("%s", reason)
+                        # This is an exception, not a routine ops digest: an
+                        # already-posted address may be wrong for responders.
+                        _OPS_TASKS.append(asyncio.create_task(
+                            alert_waha.send_ops("⚠️ " + reason)))
+                    for call in valid_calls:
                         cid = str(call.get("id") or call.get("filename") or "")
                         if not cid or cid in ids:
                             continue

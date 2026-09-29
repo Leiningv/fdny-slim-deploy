@@ -135,12 +135,12 @@ def _local_transcribe(wav_path: str) -> str:
 
 
 def second_listen(wav_path: Path | str, profile: str) -> str:
-    """One Groq pass on a held Zello incident, off by default.
+    """One Groq pass on a selected held incident, off by default.
 
     The caller owns safe trigger selection, job-local match and re-verification.
     """
     if not (GROQ_ENABLED and GROQ_KEY and
-            profile in ("zello-sullivan", "zello-hatzalah", "zello-hatzolah")):
+            profile in ("zello-sullivan", "zello-hatzalah", "zello-hatzolah", "fdny")):
         return ""
     try:
         return _groq_transcribe(str(wav_path))

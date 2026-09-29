@@ -449,6 +449,9 @@ def extract_audio_crosses(text: str) -> str | None:
 
     def _pair(a: str, b: str) -> str | None:
         a, b = a.strip(), b.strip()
+        if a.split()[0].lower() in {"street", "st", "avenue", "ave", "road", "rd", "place", "pl"} \
+                and len(a.split()) > 1:
+            return None
         if _ok(a) and _ok(b) and a.lower() != b.lower():
             return f"{a} & {b}"
         return None
@@ -502,6 +505,21 @@ def extract_audio_crosses(text: str) -> str | None:
         r = _pair(m.group(1), m.group(2))
         if r:
             return r
+    # A digit-led primary job address may end with "Street" immediately
+    # before an untyped first cross. The generic anchored-to-bare pattern
+    # below can accidentally consume that trailing Street as a cross name
+    # ("Street Neptune & Mermaid Avenue" on 2860 West 23). Capture only
+    # the two roads following the full numbered address, or keep no pair.
+    if re.search(r"\b\d{1,5}\s+(?:West|East|North|South)\s+\d{1,3}"
+                 r"(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave)\b", t, re.I):
+        m = re.search(r"\b\d{1,5}\s+(?:West|East|North|South)\s+\d{1,3}"
+                      r"(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave)\b"
+                      r"\s*[,;.]?\s+([A-Z][a-z.'-]{2,})\s+to\s+"
+                      r"([A-Z][a-z.'-]{2,}\s+" + _T + r")\b", t, re.I)
+        if m:
+            r = _pair(m.group(1), m.group(2))
+            if r:
+                return r
     # anchored to anchored: "Glenwood Road to Avenue H"
     m = re.search(rf"({_ANCH})\s+to\s+({_ANCH})\b", t, re.I)
     if m:
@@ -774,6 +792,19 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         metro = re.search(r"\b(?:address\s+)?(\d{1,3})\s+(Metro\s*Tech)(?:\s+Center)?\b", _norm(text), re.I)
         if metro:
             return _with_area(f"{metro.group(1)} MetroTech Center", profile, text)
+        # FDNY ASR can insert "Number" before an ordinal road: "261 Number
+        # 9 Street" is a house on 9th Street, not an unnumbered "Number 9"
+        # road. Require a separate house and explicit road type; the sender
+        # must still verify the exact mapped house before any alert.
+        number_street = re.search(
+            r"\b(\d{1,5})\s+Number\s+(\d{1,3})(?:st|nd|rd|th)?\s+"
+            r"(Street|St|Avenue|Ave)\b", _norm(text), re.I)
+        if number_street:
+            n = int(number_street.group(2))
+            if 1 <= n <= 150:
+                suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+                road = "Street" if number_street.group(3).lower() in ("st", "street") else "Avenue"
+                return _with_area(f"{number_street.group(1)} {n}{suffix} {road}", profile, text)
         # ASR may omit the ordinal suffix inside a numbered South street:
         # "330 South 3 Street". A distinct house number before the road is
         # stronger than a later bare "Box 231, 330 South 3" readout. Keep
@@ -837,6 +868,30 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
             follow = text[bare_box_street.end():]
             if re.match(r"\s*(?:,|\.|between|at|off|from|to|for|and|$)", follow, re.I):
                 return _with_area(_addr_title(bare_box_street.group(1)), profile, text)
+        # A numbered subway emergency exit is a facility identifier, not a
+        # house. "exit number 264 on Tillery Street" may be followed by a
+        # street/cross without any dispatch address. Skip that ID only;
+        # a different complete house in this transcript can still win.
+        address_text = _norm(text)
+        if re.search(r"\b(?:subway\s+)?emergency\s+exits?\b", address_text, re.I):
+            address_text = re.sub(
+                r"\b(?:subway\s+)?emergency\s+exits?\s+(?:number\s+)?\d{1,5}\b",
+                "emergency exit", address_text, flags=re.I)
+            address_text = re.sub(
+                r"\b(?:and\s+)?(?:exit\s+)?number\s+\d{1,5}\s+on\b",
+                "on", address_text, flags=re.I)
+        # A bare road can follow a spoken box without a separate house:
+        # "Box 3734, Clarendon Road between East 31 and East 32". The box
+        # is not an address number. This is a display-only bare-road candidate;
+        # sender still verifies it or holds it.
+        bare_box_named = re.search(
+            r"\bbox\s+\d{2,4}\s*[,;]?\s+(?:on\s+)?"
+            r"([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2}\s+"
+            r"(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Drive|Dr|Place|Pl))\b"
+            r"(?=\s*(?:[,;. ]|between\b|to\b|at\b|for\b|$))", _norm(text), re.I)
+        if bare_box_named and not re.search(r"\b\d{1,5}\s+" +
+                re.escape(bare_box_named.group(1)) + r"\b", text[bare_box_named.end():], re.I):
+            return _with_area(_addr_title(bare_box_named.group(1)), profile, text)
         # house number on a named street ('710 Grand Street') is the dispatch
         # address; it beats the 'that's off X and Y' named-cross glue (710
         # Grand St posted as 'That'S Off Manhattan Ave & Graham Ave' 9/28)
@@ -849,7 +904,7 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
             r"\b(\d{1,5})\s+(?:([a-z][a-z'\-]*(?:\s+[a-z][a-z'\-]*){0,2})\s+)?"
             r"(?:(\d{1,3}(?:st|nd|rd|th))\s+)?"
             r"(street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
-            r"lane|ln|parkway|pkwy)\b", _norm(text).lower())
+            r"lane|ln|parkway|pkwy)\b", address_text.lower())
         if hn:
             w2 = (hn.group(2) or "").split()
             while w2 and w2[0] in _NAME_STOP:
@@ -863,10 +918,10 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
                 street = " ".join(x for x in (nm, ordw, typ) if x)
                 return _with_area(f"{hn.group(1)} {_addr_title(street)}",
                                   profile, text)
-        num0 = _FIRE_NUM_DISPATCH_RE.search(text)
+        num0 = _FIRE_NUM_DISPATCH_RE.search(address_text)
         if num0:
             return _with_area(f"{num0.group(1)} {_addr_title(num0.group(2).strip())}", profile, text)
-        named = extract_named_cross(text)
+        named = extract_named_cross(address_text)
         if named:
             return _with_area(named, profile, text)
     else:
@@ -899,6 +954,10 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
                 street = " ".join(x for x in (nm, ordw, typ) if x)
                 return _with_area(f"{hn.group(1)} {_addr_title(street)}",
                                   profile, text)
+    if profile == "fdny" and re.search(r"\b(?:subway\s+)?emergency\s+exits?\b", text, re.I):
+        # The named pair above is the only candidate left from this follow-up.
+        # Never let generic fallbacks reintroduce a numbered exit as a house.
+        return None
     hwy = extract_highway_intersection(text, profile)
     if hwy:
         return _with_area(hwy, profile, text)
@@ -1055,7 +1114,7 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\b(?:structure|building|house)\s+fire\b")
     if v: return v
-    v = vt(r"\bkitchen fire\b")
+    v = vt(r"\bkitchen fire\b|\bstove fire\b")
     if v: return v
     v = vt(r"\b(?:car|vehicle|auto)\s+fire\b")
     if v: return v
@@ -1078,6 +1137,9 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\bmanhole\b")
     if v: return v
+    if profile == "fdny":
+        v = vt(r"\belectrical fire\b")
+        if v: return v
     v = vt(r"\b(?:electrical|wires down|transformer)\b")
     if v: return v
     v = vt(r"\belevator\b")
@@ -1091,6 +1153,25 @@ def get_nature(text: str, profile: str = "") -> str:
                             r"(?:private dwelling|multiple dwelling)\b", t)
         if m_smoke:
             return _addr_title(m_smoke.group(0))
+    # A concrete FDNY complaint is more informative than its transmission
+    # type. Capture a bounded spoken phrase after "reporting"/"for" rather
+    # than a bare fire/smoke word elsewhere in a multi-job transcript.
+    # No arbitrary noun phrase becomes an alert; recognized complaint heads
+    # and bounded location details are required. Known structured natures
+    # above (including actual fire and apartment) still have precedence.
+    if profile == "fdny":
+        complaint = re.search(
+            r"\b(?:reporting|for)\s+(?:an?\s+)?"
+            r"(?P<nature>(?:stove|kitchen|bedroom|electrical|rubbish|garbage|"
+            r"brush|vehicle|car|structure|building|house)\s+fire|"
+            r"(?:odou?r\s+(?:of\s+)?(?:gas|smoke)|gas\s+odou?r)|"
+            r"(?:fire|smoke)\s+(?:in|on|at)\s+(?:the\s+|an?\s+)?"
+            r"(?:[a-z]+(?:\s+[a-z]+){0,2}\s+)?"
+            r"(?:floor|basement|cellar|post office|lobby|hallway|stairwell|"
+            r"dwelling|building|apartment)|"
+            r"smoke\s+in\s+the\s+area)\b", t)
+        if complaint and not _negative_fire_context(t):
+            return _addr_title(complaint.group("nature"))
     v = vt(r"\b(?:rubbish fire|garbage fire|trash fire|rubbish)\b")
     if v: return v
     v = vt(r"\b(?:outside fire|brush fire)\b")
@@ -1099,7 +1180,7 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     # A dispatcher can say either "odor of gas" or "gas odor". Both are
     # explicit complaints and outrank the transmission type (Phone Alarm).
-    v = vt(r"\b(?:odou?r of gas|gas odou?r)\b")
+    v = vt(r"\b(?:odou?r (?:of )?gas|gas odou?r|odou?r (?:outside|in the area))\b")
     if v: return v
     # Confirmed FDNY ASR variants for an audible "odor of gas" complaint.
     # Only the complete two/three-word phrase qualifies, not generic "gas".
@@ -1134,6 +1215,10 @@ def get_nature(text: str, profile: str = "") -> str:
                 r"\b(?:activated\s+(?:fire\s+)?alarm|fire\s+alarm\s+activation|"
                 r"(?:fire|smoke|automatic|phone|still)\s+alarm|alarm\s+activation)\b", t):
             return _addr_title(m.group(0))
+    if profile == "fdny" and not _negative_fire_context(t):
+        v = vt(r"\b(?:reporting|for)\s+(?:an?\s+)?(?:fire|smoke)\b")
+        if v:
+            return "Fire" if re.search(r"\bfire\b$", v, re.I) else "Smoke"
     # transmission-type fallbacks are LAST RESORT - content natures above
     # always win ('phone alarm... fire in a private dwelling' must post the
     # fire, not the alarm type; 6:04 AM E 84th St job 9/28)

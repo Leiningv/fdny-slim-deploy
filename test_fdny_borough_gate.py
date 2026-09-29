@@ -158,6 +158,7 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
         stats = Mock()
         with tempfile.TemporaryDirectory() as d:
             with (patch.object(main, '_fdny_fetch_clip', return_value=Path(d)/'clip.wav'),
+                  patch.object(main, '_fdny_clip_sanity', return_value=''),
                   patch.object(main, '_archive_clip'),
                   patch.object(main, '_save_seen'),
                   patch.object(main, '_held_recording', new_callable=AsyncMock, return_value='https://example.invalid/park.ogg') as recording,
@@ -188,6 +189,7 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
         stats = Mock()
         with tempfile.TemporaryDirectory() as d:
             with (patch.object(main, '_fdny_fetch_clip', return_value=Path(d)/'clip.wav'),
+                  patch.object(main, '_fdny_clip_sanity', return_value=''),
                   patch.object(main, '_archive_clip'),
                   patch.object(main, '_save_seen'),
                   patch.object(main, '_held_recording', new_callable=AsyncMock, return_value='https://example.invalid/cortelyou.ogg') as recording,
@@ -217,6 +219,7 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
         stats = Mock()
         with tempfile.TemporaryDirectory() as d:
             with (patch.object(main, '_fdny_fetch_clip', return_value=Path(d)/'clip.wav'),
+                  patch.object(main, '_fdny_clip_sanity', return_value=''),
                   patch.object(main, '_archive_clip'), patch.object(main, '_save_seen'),
                   patch.object(main, '_held_recording', new_callable=AsyncMock,
                                return_value='https://example.invalid/1615.ogg'),
@@ -248,6 +251,7 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
                 stats = Mock()
                 with (patch.object(main, '_fdny_fetch_clip', return_value=Path(d)/'clip.wav'),
+                  patch.object(main, '_fdny_clip_sanity', return_value=''),
                       patch.object(main, '_archive_clip'),
                       patch.object(main, '_save_seen'),
                       patch.object(main, 'geocode_verify', new_callable=AsyncMock,
@@ -274,6 +278,7 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
         stats = Mock()
         with tempfile.TemporaryDirectory() as d:
             with (patch.object(main, '_fdny_fetch_clip', return_value=Path(d)/'clip.wav'),
+                  patch.object(main, '_fdny_clip_sanity', return_value=''),
                   patch.object(main, '_archive_clip'),
                   patch.object(main, '_save_seen'),
                   patch.object(main, '_held_recording', new_callable=AsyncMock, return_value='https://example.invalid/clip.ogg') as recording,
@@ -448,14 +453,14 @@ class TestFdnySpokenBoroughFooter(unittest.TestCase):
 
 
 class TestCrossLabel(unittest.TestCase):
-    def test_bet_prefix_all_profiles(self):
+    def test_cross_prefix_all_profiles(self):
         import main
         for address in ('426 Baltic Street, Brooklyn, NY',
                         '159-22 Hillside Avenue, Queens, NY'):
             with self.subTest(address=address):
                 text = main.format_alert({'source': 'fdny', 'nature': 'Alarm Activation',
                                           'address': address}, crosses='Hoyt & Bond')
-                self.assertIn('BET- Hoyt & Bond', text)
+                self.assertIn('C/s Hoyt & Bond', text)
                 self.assertNotIn('\nbet ', text)
 
 
@@ -612,6 +617,7 @@ class TestMixedFdnyBoxClip(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as d:
             stats = Mock()
             with (patch.object(main, "_fdny_fetch_clip", return_value=Path(d)/"x.wav"),
+                  patch.object(main, '_fdny_clip_sanity', return_value=''),
                   patch.object(main, "_archive_clip"), patch.object(main, "_save_seen"),
                   patch.object(main, "_kw_check", new_callable=AsyncMock),
                   patch.object(main, "_held_recording", new_callable=AsyncMock, return_value=""),
