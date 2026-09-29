@@ -117,12 +117,13 @@ class SullivanAreaPresentation(unittest.IsolatedAsyncioTestCase):
             outcome = await main.verify_and_send('zello-sullivan', hit, Mock())
         self.assertEqual(outcome, 'sent')
         sent = send.await_args.args[0]
-        self.assertIn('📍 *888 Resorts World Drive*\n*THOMPSON*\nbet Conklin Drive & Lynn Road', sent)
+        self.assertIn('📍 *888 Resorts World Drive*\n*THOMPSON*\nBET- Conklin Drive & Lynn Road', sent)
         self.assertNotIn('Sullivan Co, NY', sent)
 
     def test_without_verified_area_formatter_does_not_guess(self):
         hit = {'source': 'zello-sullivan', 'nature': 'Difficulty Breathing',
                'address': '888 Resorts World Drive, Sullivan Co, NY'}
         sent = main.format_alert(hit)
-        self.assertIn('Sullivan Co, NY', sent)
+        self.assertIn('📍 *888 Resorts World Drive*', sent)
+        self.assertNotIn('Sullivan Co, NY', sent)
         self.assertNotIn('*THOMPSON*', sent)
