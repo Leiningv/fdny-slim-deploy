@@ -780,6 +780,16 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         if class_house:
             return _with_area(f"{class_house.group(1)} {_addr_title(class_house.group(2))}",
                               profile, text)
+        # The Brooklyn letter avenue is "Avenue U", not an unnumbered
+        # "1111 Avenue" or an intersection inferred from later cross roads.
+        # Require a distinct house before the typed letter avenue; never
+        # promote the class/terminal digits to a building number.
+        letter_avenue = re.search(
+            r"\b(\d{1,5})\s+(Avenue|Ave)\s+([A-Z])\b", text)
+        if letter_avenue and not re.search(
+                r"\b(?:box|terminal|class)\s*$", text[max(0, letter_avenue.start()-12):letter_avenue.start()], re.I):
+            return _with_area(f"{letter_avenue.group(1)} Avenue {letter_avenue.group(3)}",
+                              profile, text)
         # A spoken alarm/box ID followed by a separate numbered East/West
         # street still has a house address. Do not turn the alarm ID into
         # the house or let a later apartment numeral replace the house.
@@ -905,6 +915,11 @@ def get_nature(text: str, profile: str = "") -> str:
     # case must not be promoted to fire from the earlier fragment. A later
     # explicit fire complaint remains governed by the normal cascade.
     if profile == "fdny":
+        manual = re.search(r"\bmanual\s+(?:fire\s+)?alarm\b", t)
+        if manual and not re.search(
+                r"\b(?:structure|building|house|kitchen|car|vehicle|actual)\s+fire\b"
+                r"|\bfire\s+in\s+a\s+private\s+dwelling\b", t[manual.end():]):
+            return _addr_title(manual.group(0))
         alarm = re.search(r"\bautomatic\s+(?:fire\s+)?alarm(?:\s+in\s+(?:an?\s+)?(?:office\s+building|private\s+dwelling))?\b", t)
         if alarm and not re.search(r"\b(?:structure|building|house|kitchen|car|vehicle|actual)\s+fire\b|\bfire\s+in\s+a\s+private\s+dwelling\b", t[alarm.end():]):
             return _addr_title(alarm.group(0))
@@ -1440,8 +1455,21 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     spoken_pair = extract_audio_crosses(t) if profile != "fdny" else None
     if direct_pair and spoken_pair and spoken_pair.split("&", 1)[0].strip().lower() == direct_pair[0].lower():
         spoken_pair = f"{direct_pair[0]} & {direct_pair[1]}"
+    # A numbered dispatch address followed by its bare cross streets is the
+    # primary location. "1339 Union Street between Brooklyn and New York"
+    # must not become the unnumbered Brooklyn/New York intersection. Require
+    # the crosses immediately after this complete address: an earlier house
+    # mentioned in a separate job does not license stitching the two.
+    numbered_before_cross = None
+    if profile == "hatzolah" and spoken_pair:
+        numbered_before_cross = re.search(
+            r"\b\d{1,5}\s+(?:[A-Za-z][A-Za-z'-]*\s+){1,3}"
+            r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|"
+            r"Place|Pl|Lane|Ln)\s+between\b", t, re.I)
     if terminal_street:
         addr = _with_area(terminal_street, profile, t)
+    elif numbered_before_cross:
+        addr = extract_dispatch_address(t, profile)
     elif direct_pair:
         addr = _with_area(direct_pair[0], profile, t)
     elif spoken_pair and "&" in spoken_pair and re.search(
@@ -1527,6 +1555,19 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         parts = [p for p in parts if _canon_street(p) != addr_core]
         cross = " & ".join(parts) if parts else None
     nature = get_nature(t, profile)
+    if profile == "hatzolah" and nature and re.search(r"^\d{1,5}\s+", addr):
+        # A separate later complaint with no matching full address cannot
+        # inherit the first dispatch's house simply by sharing one ASR chunk.
+        # A spoken "between X and Y for unresponsive" is the same address's
+        # complaint; a new "medic call at X" is not.
+        numbered = re.search(
+            r"\b\d{1,5}\s+(?:[A-Za-z][A-Za-z'-]*\s+){0,3}"
+            r"(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Boulevard|Blvd)\b", t, re.I)
+        later_job = re.search(
+            r"\b(?:medic\s+call|new\s+call|another\s+job|second\s+job)\s+"
+            r"(?:at|for|on)\b", t[numbered.end():] if numbered else "", re.I)
+        if later_job:
+            nature = ""
     apt = extract_apartment(t)
     if not apt and profile == "fdny" and nature and "smoke" in nature.lower():
         # FDNY dispatch sometimes says "smoke 1 Adam" with no apartment

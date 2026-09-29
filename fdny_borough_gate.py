@@ -96,5 +96,9 @@ def unnumbered_with_spoken_building(transcript: str, parsed_address: str) -> str
         prefix = transcript[max(0, match.start() - 7):match.start()]
         if re.search(r"\bbox\s*$", prefix, re.I):
             continue
+        # "East 12 to Coney Island Avenue" is a cross-road corridor,
+        # not building 12 on a road named "to Coney Island Avenue".
+        if re.match(r"(?:to|toward|towards|and)\s+", match.group("road"), re.I):
+            continue
         return f"{match.group('house')} {match.group('road')}"
     return ""

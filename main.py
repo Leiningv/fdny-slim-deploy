@@ -1344,6 +1344,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         stats.event(profile, f"box-only verified address from Brooklyn Box {heard_box}: {candidate}")
         verified_label, locality = candidate, "Brooklyn"
     if GEOCODE_VERIFY and not hit.get("box_only"):
+        location_check_started = time.monotonic()
         # Intersections require BOTH spoken roads at one point. The ordinary
         # geocoder can otherwise certify the first street only.
         spoken_location = hit["address"].split(",")[0]
@@ -1509,7 +1510,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 stats.event(profile, f"cross completed from map: {cross}")
     if not cross and not direct_pair_verified and not hit.get("unresolved_spoken_corner_fallback") \
             and not hit.get("direct_cross_candidate") and not spoken_three \
-            and lat is not None and lon is not None and verified_label:
+            and lat is not None and lon is not None and verified_label \
+            and profile.lower().removeprefix("zello-") != "sullivan":
         street_core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"])
         street_core = re.sub(r"[,.;].*$", "", street_core).strip().lower()
         if street_core and street_core in verified_label.lower():
@@ -1520,7 +1522,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 cross = ""
             if cross:
                 stats.event(profile, f"cross streets (computed): {cross}")
-    if cross and lat is not None and lon is not None and verified_label:
+    if cross and lat is not None and lon is not None and verified_label \
+            and profile.lower().removeprefix("zello-") != "sullivan":
         core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"].split(",")[0]).strip()
         # Optional naming pass must not hold a verified, spoken incident hostage
         # to a slow Overpass endpoint. On timeout keep the spoken pair untouched.
@@ -1608,6 +1611,11 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 hit["address"] = corrected
                 verified, in_sullivan = True, ins2
                 verified_label, lat, lon, locality = lbl2, la2, lo2, loc2
+    if profile.lower().removeprefix("zello-") == "sullivan" and GEOCODE_VERIFY:
+        location_check_finished = time.monotonic()
+        logging.info("[%s] stages location_check=%.2fs before_location=%.2fs",
+                     profile, location_check_finished-location_check_started,
+                     location_check_started-verify_started)
     if not cross:
         ops_log(f"No cross street was said clearly enough to verify for {hit['nature']} at {hit['address']}.")
     colony = None
@@ -1752,6 +1760,21 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         ops_log(f"suppressed (ambiguous box/house split): {hit['address']}")
         hit["hold_reason"] = "ambiguous box/house split"
         return "suppressed"
+    if profile.lower().removeprefix("zello-") == "sullivan" and verified and in_sullivan:
+        # The county is a verification boundary, not the outgoing area name.
+        # A spoken town may win over a smaller mapped village ONLY when that
+        # same town is independently present in the map's verified label.
+        mapped = re.sub(r"^(?:village|town|hamlet|city) of\s+", "", locality.strip(), flags=re.I)
+        spoken = re.search(r"\btown of\s+([A-Za-z][A-Za-z'-]*)\b", hit.get("excerpt") or "", re.I)
+        if spoken and re.search(r"\bTown of\s+" + re.escape(spoken.group(1)) +
+                                r"\b", verified_label, re.I):
+            mapped = spoken.group(1)
+        if mapped and mapped.lower() not in ("sullivan co", "sullivan county", "new york"):
+            hit["verified_area"] = mapped
+        else:
+            hit["hold_reason"] = "verified Sullivan location has no town/area"
+            stats.event(profile, f"Held: {hit['hold_reason']}: {hit['address']}")
+            return "suppressed"
     # A verified address is mandatory. A box alone cannot rehabilitate an
     # unverified ASR road spelling. A mismatched box is omitted, not swapped
     # for another guessed box; an absent box is never guessed.
@@ -1793,6 +1816,11 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                             audio_ts=(audio_ts if audio_ts is not None else fresh_ts)
                             if clip_name else None, spoken_time=hit.get("spoken_time") or "")
     verified_at = time.monotonic()
+    if profile.lower().removeprefix("zello-") == "sullivan":
+        logging.info("[%s] stages verification_total=%.2fs after_location=%.2fs",
+                     profile, verified_at-verify_started,
+                     verified_at-location_check_finished if 'location_check_finished' in locals()
+                     else 0.0)
     ogg = None
     if ogg_task is not None:
         try:
@@ -1849,8 +1877,12 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     Audio follows separately as a voice-note bubble."""
     now = datetime.now(NY).strftime("%-I:%M %p")
     nature = (hit.get("nature") or "").strip().upper()
-    addr_line = f"\N{ROUND PUSHPIN} *{hit['address']}*"
-    if (hit.get("source") or "").removeprefix("zello-") == "sullivan" and footer:
+    is_sullivan = (hit.get("source") or "").removeprefix("zello-") == "sullivan"
+    street = hit["address"]
+    if is_sullivan and hit.get("verified_area"):
+        street = re.sub(r",\s*[^,]+,\s*NY$", "", street, flags=re.I)
+    addr_line = f"\N{ROUND PUSHPIN} *{street}*"
+    if is_sullivan and footer:
         addr_line += f" ({footer})"
     if not confirmed:
         addr_line += " (not confirmed)"
@@ -1866,6 +1898,8 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         r"collision|rollover|entrap)\w*\b", nature, re.I)
     icon = "\N{AMBULANCE}" if medical else "\N{FIRE}"
     lines = [f"*{icon} {nature}*", "", addr_line]
+    if is_sullivan and hit.get("verified_area"):
+        lines.append(f"*{hit['verified_area'].upper()}*")
     if hit.get("apartment"):
         lines.append(hit["apartment"])
     if crosses:
@@ -1978,7 +2012,11 @@ async def ptt_consumer(profile: str, stats: Stats, seen: dict) -> None:
                     zello_ingest.stream_owner(profile, wav.stem, started, stopped, "failed")
                     wav.unlink(missing_ok=True);wav.with_suffix(".json").unlink(missing_ok=True)
                     continue
+                asr_started = time.monotonic()
                 text = await asyncio.to_thread(transcribe.transcribe, wav, profile)
+                logging.info("[%s] stages ptt_stop_to_read=%.2fs asr=%.2fs",
+                             profile, max(0.0, time.time()-stopped),
+                             time.monotonic()-asr_started)
                 if not text:
                     zello_ingest.stream_owner(profile, wav.stem, started, stopped, "failed")
                     wav.unlink(missing_ok=True);wav.with_suffix(".json").unlink(missing_ok=True)
