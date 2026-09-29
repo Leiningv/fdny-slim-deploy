@@ -23,6 +23,17 @@ _ADDRESS_SUFFIX = re.compile(
 
 def spoken_job_borough(transcript: str) -> str:
     """Only a job-local location declaration changes the feed's default borough."""
+    # Dispatches on the Brooklyn feed sometimes open with a borough plus
+    # alarm class before the box and address: "Queens, one alarm Box 2139".
+    # Only this job opener (before its first box) is locality evidence;
+    # later "Engine 107 from Brooklyn" is unit affiliation, not a place.
+    opening = re.search(
+        r"^.{0,75}?\b(?P<borough>Queens|Manhattan|Bronx|Staten\s+Island|Brooklyn)"
+        r"\s*,?\s*(?:one|first|second|third|fourth|fifth)\s+alarm\s+"
+        r"(?:box\s+\d{2,4}|(?:transmitted|for)\b)", transcript, re.I)
+    boxes = set(re.findall(r"\bbox\s*(\d{2,4})\b", transcript, re.I))
+    if opening and len(boxes) <= 1 and (not re.search(r"\bbox\s+\d{2,4}\b", transcript[:opening.start()])):
+        return " ".join(opening.group("borough").title().split())
     shorthand = re.search(
         r"\b(?:Brooklyn\s+Housing|Program\s+announcing)\s*,?\s*"
         r"(?P<borough>Queens|Manhattan|Bronx|Staten\s+Island)\s*,?\s*"

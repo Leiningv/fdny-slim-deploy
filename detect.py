@@ -472,6 +472,18 @@ def extract_audio_crosses(text: str) -> str | None:
         r = _pair(m.group(1), m.group(2))
         if r:
             return r
+    # Fully typed pair after a complete numbered address: "1409 New York
+    # Avenue, Foster Avenue and Farragut Road". Keep only spoken roads; the
+    # sender checks both intersections against the verified house geometry.
+    m = re.search(r"\b\d{1,5}(?:-\d{1,3})?\s+(?:[A-Z][a-z.'-]+\s+){1,3}"
+                  r"(?:Street|St|Avenue|Ave|Road|Rd|Place|Pl)\s*[,;]?\s+"
+                  r"([A-Z][a-z.'-]+\s+(?:Street|St|Avenue|Ave|Road|Rd|Place|Pl))"
+                  r"\s+and\s+"
+                  r"([A-Z][a-z.'-]+\s+(?:Street|St|Avenue|Ave|Road|Rd|Place|Pl))\b", t)
+    if m:
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
     # Spoken bare pair after a numbered, typed job address. No map spelling
     # is invented: the bare names are preserved and checked downstream.
     m = re.search(r"\b\d{1,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\s+"
@@ -1226,6 +1238,17 @@ def get_nature(text: str, profile: str = "") -> str:
     # Only this spoken phrase, not a bare "smoke", earns the separate nature.
     v = vt(r"\b(?:odou?r\s+of\s+)?smoke\s+in\s+the\s+area\b")
     if v: return "Smoke in the area"
+    # A phone-alarm transmission with a job-local smoke complaint and the
+    # callers' apartment is a smoke job, not a mere transmission type. The
+    # apartment is captured below; require this complete complaint wording,
+    # not a loose "smoke" in mixed radio chatter.
+    if (profile == "fdny" and not _negative_fire_context(t)
+            and len(set(re.findall(r"\bbox\s*(\d{2,4})\b", t, re.I))) <= 1):
+        m_smoke_callers = re.search(
+            r"\bsmoke\s*[,;.]?\s*callers?['’]?s?\s+in\s+"
+            r"(?:the\s+)?apartment\s+\d{1,3}\s*[a-z]\b", t, re.I)
+        if m_smoke_callers:
+            return "Smoke"
     # Alarm activation is not evidence of an actual fire. Preserve the
     # spoken alarm nature, unless a specific fire complaint above won first.
     v = vt(r"\b(?:activated\s+(?:fire\s+)?alarm|fire\s+alarm\s+activation)\b")
