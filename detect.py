@@ -572,6 +572,31 @@ def extract_direct_street_pair(text: str) -> tuple[str, str] | None:
     return None
 
 
+def extract_spoken_three_road_location(text: str) -> tuple[str, str, str] | None:
+    """A spoken primary road followed by two separately named crossing roads.
+
+    E.g. "Dry Harbor Road, 84th Place and 85th Street". Require all
+    three complete street types and a location-introducing phrase; unit
+    numbers elsewhere in the transmission cannot become a street.
+    """
+    word = r"[A-Za-z0-9][A-Za-z0-9.'-]*"
+    typ = r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln|Parkway|Pkwy|Court|Ct|Terrace|Ter)"
+    road = rf"{word}(?:\s+{word}){{0,2}}?\s+{typ}"
+    for m in re.finditer(rf"(?=\b({road})\s*,\s*({road})\s+(?:and|&)\s+({road})\b)", text, re.I):
+        pre = text[:m.start()]
+        if not re.search(r"(?:\b(?:for|at|on|in|to|corner of|intersection of)\s+|,\s*)$", pre, re.I):
+            continue
+        roads = [r.strip() for r in m.groups()]
+        for i, road_name in enumerate(roads):
+            words = road_name.split()
+            while words and words[0].lower() in _NAME_STOP:
+                words.pop(0)
+            roads[i] = " ".join(words)
+        if all(roads) and len({r.lower() for r in roads}) == 3:
+            return tuple(roads)
+    return None
+
+
 def extract_named_cross(text: str) -> str | None:
     """FDNY style: 'Smith Street at Baltic' -> 'Smith St & Baltic St'.
 
@@ -868,6 +893,18 @@ def get_nature(text: str, profile: str = "") -> str:
     cleaned. Returns the matched phrase ('' when nothing is discernible).
     Cascade order is unchanged: content natures beat transmission types."""
     t = text.lower()
+    # A leading "working fire" ASR fragment can be transmission chatter while
+    # the actual dispatched complaint later says automatic alarm. This FDNY
+    # case must not be promoted to fire from the earlier fragment. A later
+    # explicit fire complaint remains governed by the normal cascade.
+    if profile == "fdny":
+        alarm = re.search(r"\bautomatic\s+(?:fire\s+)?alarm(?:\s+in\s+(?:an?\s+)?(?:office\s+building|private\s+dwelling))?\b", t)
+        if alarm and not re.search(r"\b(?:structure|building|house|kitchen|car|vehicle|actual)\s+fire\b|\bfire\s+in\s+a\s+private\s+dwelling\b", t[alarm.end():]):
+            return _addr_title(alarm.group(0))
+    # Preserve a spoken age with its medical complaint, never invent one.
+    aged = re.search(r"\b(?:the\s+)?(\d{1,3}[- ]year[- ]old)\s+(?:patient\s+)?(not\s+feeling\s+well|feeling\s+unwell|feels\s+unwell)\b", t)
+    if aged:
+        return _addr_title(aged.group(1) + " " + aged.group(2))
     # Keep the dispatcher's entire medical complaint when a cardiac patient
     # is described as not feeling well; the isolated "cardiac" word is not a
     # diagnosis and the complaint must not lose its spoken qualifier.
@@ -1373,7 +1410,10 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     # same-street read in one dispatch, the last complete pair is the final
     # correction (Beach/Church -> Beach/Middle Neck). Do not mix different
     # primary roads into this rule.
+    three_roads = extract_spoken_three_road_location(t) if profile != "fdny" else None
     direct_pair = extract_direct_street_pair(t) if profile != "fdny" else None
+    if three_roads:
+        direct_pair = (three_roads[0], three_roads[1])
     if profile == "hatzolah" and direct_pair:
         first = direct_pair[0]
         later = list(re.finditer(
@@ -1454,8 +1494,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                  r"Drive|Dr|Place|Pl|Lane|Ln)$", street_part):
         logging.info("suppressed (dangling intersection address): %s", addr)
         return None
-    cross = extract_audio_crosses(t)
-    if direct_pair and cross and cross.split("&", 1)[0].strip().lower() == direct_pair[0].lower():
+    cross = f"{three_roads[1]} & {three_roads[2]}" if three_roads else extract_audio_crosses(t)
+    if not three_roads and direct_pair and cross and cross.split("&", 1)[0].strip().lower() == direct_pair[0].lower():
         cross = f"{direct_pair[0]} & {direct_pair[1]}"
     if terminal_street:
         cross = "8th Avenue & 9th Avenue"
@@ -1550,7 +1590,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                       r"\d{1,3}(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", t, re.I).group(1)
             if profile == "fdny" and re.search(r"\b(?:that'?s\s+)?at\s+((?:East|West|North|South|E|W|N|S)\s+"
                       r"\d{1,3}(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", t, re.I) else ""),
-        "direct_cross_candidate": direct_pair[1] if direct_pair else "",
+        "direct_cross_candidate": direct_pair[1] if direct_pair and not three_roads else "",
+        "spoken_three_road_crosses": f"{three_roads[1]} & {three_roads[2]}" if three_roads else "",
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,

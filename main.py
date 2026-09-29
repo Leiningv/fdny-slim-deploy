@@ -1429,6 +1429,37 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             stats.event(profile, f"spoken intersection map-verified: {hit['address']}")
         else:
             stats.event(profile, f"spoken second street unverified: {direct_candidate}")
+    spoken_three = (hit.get("spoken_three_road_crosses") or "").strip()
+    if spoken_three:
+        # Both crossing roads were said after the primary road. Verify each
+        # against that primary, not against one another. If either map check
+        # fails, hold instead of substituting a nearby unspoken cross.
+        sides = [p.strip() for p in spoken_three.split("&")]
+        if not verified or len(sides) != 2:
+            hit["hold_reason"] = "spoken crossing roads not verified"
+            stats.event(profile, f"suppressed (spoken crosses unverified): {hit['address']}")
+            return "suppressed"
+        checked = []
+        for side in sides:
+            try:
+                point = await asyncio.wait_for(_intersection_point(hit["address"], side), timeout=9)
+            except Exception:
+                point = (None, None)
+            if point[0] is None:
+                hit["hold_reason"] = f"spoken cross unverified: {side}"
+                stats.event(profile, f"suppressed (spoken cross unverified): {side}")
+                return "suppressed"
+            checked.append(point)
+        # A single junction cannot be called "between" two distinct roads.
+        # The map points must be distinct and within a short corridor.
+        import math
+        gap_m = math.hypot((checked[0][0] - checked[1][0]) * 111000,
+                           (checked[0][1] - checked[1][1]) * 85000)
+        if not 20 <= gap_m <= 750:
+            hit["hold_reason"] = "spoken crossings not a bounded block"
+            stats.event(profile, f"suppressed (spoken crossings geometry): {gap_m:.0f}m")
+            return "suppressed"
+        stats.event(profile, f"two spoken crosses map-verified: {spoken_three}")
     cross = (hit.get("cross") or "").strip()
     # A single directly spoken FDNY cross is never invented from a box row.
     # Only keep it beside the selected box after a real road intersection
@@ -1460,7 +1491,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         # single spoken cross ('off Woodbine Street') - complete the pair
         # from the map, spoken side first
         comp, _exact = await _cross_streets(lat, lon, hit["address"])
-        if comp:
+        if comp and _exact:
             spoken = cross.strip().lower()
             other = [p.strip() for p in comp.split("&")
                      if p.strip() and p.strip().lower() != spoken]
@@ -1468,15 +1499,18 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 cross = f"{cross} & {other[0]}"
                 stats.event(profile, f"cross completed from map: {cross}")
     if not cross and not direct_pair_verified and not hit.get("unresolved_spoken_corner_fallback") \
+            and not hit.get("direct_cross_candidate") and not spoken_three \
             and lat is not None and lon is not None and verified_label:
         street_core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"])
         street_core = re.sub(r"[,.;].*$", "", street_core).strip().lower()
         if street_core and street_core in verified_label.lower():
             cross, exact = await _cross_streets(lat, lon, hit["address"])
             cross = cross or ""
+            if cross and not exact:
+                stats.event(profile, "approximate map crosses omitted")
+                cross = ""
             if cross:
-                tag = "computed" if exact else "approx"
-                stats.event(profile, f"cross streets ({tag}): {cross}")
+                stats.event(profile, f"cross streets (computed): {cross}")
     if cross and lat is not None and lon is not None and verified_label:
         core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"].split(",")[0]).strip()
         # Optional naming pass must not hold a verified, spoken incident hostage
