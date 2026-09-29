@@ -775,7 +775,11 @@ def make_app(stats: Stats) -> web.Application:
         if not _ctl_ok(req):
             raise web.HTTPNotFound()
         origin = req.headers.get("Origin", "")
-        if origin != str(req.url.origin()):
+        # Render terminates TLS at its proxy, so req.scheme can be http even
+        # when the browser's Origin is https. Match the public Host and require
+        # https there; keep exact origin matching for direct/local HTTP tests.
+        external = f"https://{req.host}" if req.host.endswith(".onrender.com") else str(req.url.origin())
+        if origin != external:
             raise web.HTTPForbidden(text="same-origin form required")
         d = await req.post()
         if not hmac.compare_digest(str(d.get("nonce", "")), test_nonce):

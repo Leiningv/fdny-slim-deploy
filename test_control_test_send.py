@@ -55,6 +55,18 @@ class TestSend(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.post(nonce, text='FIRE AT 123 MAIN')).status, 400)
             send.assert_not_awaited()
 
+    async def test_render_tls_termination_accepts_public_https_origin(self):
+        nonce = await self.form()
+        with (patch.dict(status.os.environ, {'CONTROL_TOKEN': 'private-test-token'}),
+              patch('alert_waha.configured', return_value=True),
+              patch('alert_waha._chat', return_value='alert@g.us'),
+              patch('alert_waha.send_text', new_callable=AsyncMock, return_value=True) as send):
+            r = await self.client.post(self.path + 'test-send',
+                data={'nonce': nonce, 'text': 'TEST ALERT'},
+                headers={'Origin': 'https://fdny-slim.onrender.com', 'Host': 'fdny-slim.onrender.com'})
+            self.assertEqual(r.status, 200, await r.text())
+            send.assert_awaited_once()
+
     async def test_failed_send_does_not_retry_automatically(self):
         nonce = await self.form()
         with (patch('alert_waha.configured', return_value=True),
