@@ -113,6 +113,10 @@ class Stats:
         self.alerts_failed = 0
         self.waha_status = "unknown"
         self.git_commit = os.environ.get("RENDER_GIT_COMMIT", "")[:7] or os.environ.get("GIT_COMMIT", "")[:7]
+        self.groq_enabled = False
+        self.groq_key_present = False
+        self.groq_last_result = "not attempted"
+        self.groq_last_at = None
         self._hist_file = Path(os.environ.get("SEG_DIR", "./segments")) / "alert_history.json"
         try:
             for a in json.loads(self._hist_file.read_text())[-500:]:
@@ -121,6 +125,14 @@ class Stats:
                                     "outcome": a.get("outcome", ""), "voice": a.get("voice", ""), "reason": a.get("reason", "")})
         except Exception:
             pass
+
+    def mark_groq(self, outcome: str) -> None:
+        # Bounded outcomes only: neither transcript nor credential enters status.
+        if outcome not in ("ok", "empty", "unavailable", "disabled"):
+            outcome = "unavailable"
+        with self._lock:
+            self.groq_last_result = outcome
+            self.groq_last_at = time.time()
 
     def feed(self, name: str) -> dict:
         return self.feeds.setdefault(name, {
@@ -222,6 +234,10 @@ class Stats:
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(STARTED_AT)),
                 "uptime_sec": round(time.time() - STARTED_AT, 1),
                 "git_commit": self.git_commit,
+                "groq": {"enabled": self.groq_enabled,
+                         "key_present": self.groq_key_present,
+                         "last_result": self.groq_last_result,
+                         "last_result_age_sec": self._age(self.groq_last_at)},
                 "waha_session": self.waha_status,
                 "alerts_sent": self.alerts_sent,
                 "alerts_failed": self.alerts_failed,

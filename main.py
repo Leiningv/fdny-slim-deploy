@@ -1719,12 +1719,23 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         import spoken_cross as crossmap
         base_road = re.sub(r"^\s*\d+[A-Za-z-]*\s+", "", hit["address"].split(",")[0])
         sides = [part.strip() for part in cross.split("&", 1)]
+        # Dispatch commonly omits the repeated type: "Foster to Newkirk
+        # Avenue" means Foster Avenue and Newkirk Avenue. Only inherit an
+        # explicit type when the first side is one bare name and both sides
+        # independently intersect this verified street near the house.
+        if (len(sides) == 2 and re.fullmatch(r"[A-Za-z][A-Za-z.'-]+", sides[0])
+                and (typed := re.search(r"\b(Avenue|Street|Road|Place|Ave|St|Rd|Pl)\b$",
+                                       sides[1], re.I))):
+            sides[0] += " " + typed.group(1)
         try:
             verdicts = await asyncio.gather(*(asyncio.wait_for(
                 crossmap.verify(base_road, side, lat, lon), timeout=10)
                 for side in sides))
         except Exception:
             verdicts = [False, False]
+        if all(verdicts) and " & ".join(sides) != cross:
+            cross = " & ".join(sides)
+            stats.event(profile, f"spoken abbreviated cross pair map-verified: {cross}")
         if not all(verdicts):
             stats.event(profile, f"unverified spoken FDNY crosses omitted: {cross}")
             ops_log(f"unverified spoken FDNY crosses omitted: {cross} @ {hit['address']}")
@@ -2848,9 +2859,6 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             stats.event("fdny", f"detect error: {e}")
     parsed_at = time.monotonic()
     wav = await fetch_task if fetch_task else None
-    # No second recognizer runs in production on the free memory tier.
-    # In particular, ordinary Brooklyn calls must not load small.en just
-    # because their address contains a named street.
     fetched_at = time.monotonic()
     if text:
         clip_problem = _fdny_clip_sanity(wav, text)
@@ -3103,6 +3111,10 @@ async def amain() -> None:
         logging.warning("BROADCASTIFY_USER not set - streams will refuse the connection")
 
     stats = Stats()
+    stats.groq_enabled = transcribe.GROQ_ENABLED
+    stats.groq_key_present = bool(transcribe.GROQ_KEY)
+    logging.info("Groq second listener: enabled=%s key_present=%s",
+                 stats.groq_enabled, stats.groq_key_present)
     try:
         if ALERTS_LOG.exists():
             for line in ALERTS_LOG.read_text().splitlines()[-100:]:
