@@ -18,7 +18,7 @@ EMERGENCY_PATTERNS = [
     r"\b(?:mva|accident|collision|rollover|entrapment|crash|wreck|mvc)\b",
     r"\b(?:members?\s+respond|respond(?:ing)?\s+to)\b",
     r"\b(?:cardiac|arrest|ems|hatzalah|hatz|medical|medic)\b",
-    r"\b(?:ped\s+struck|pedestrian|not breathing|unconscious|choking|seizure|stroke|cva|convul|heart\s+attack)\b",
+    r"\b(?:ped\s+struck|pedestrian|cyclist\s+struck|bicyclist\s+struck|not breathing|unconscious|choking|seizure|stroke|cva|convul|heart\s+attack)\b",
     r"\b(?:difficulty|difficulties)\s+breath",
     r"\brespiratory\s+distress\b",
     r"\b(?:address|avenue|street|ave|st)\s+\d+|\d+\s+(?:avenue|street|ave|st)\b",
@@ -99,6 +99,14 @@ def get_hatzolah_area(text: str) -> str:
         if re.search(rf"\b(?:in|near|at|village of|town of)\s+{re.escape(k)}\b", t) or \
                 re.search(rf"\b{re.escape(k)}\s*,?\s+(?:nj|new jersey)\b", t):
             return v
+    # A job-local Westbury address must not inherit Brooklyn's default.
+    # Only an explicit place phrase counts; a responding unit, street name,
+    # or substring is not enough. The sender still verifies Nassau county
+    # and the precise town against a live geocoder before posting.
+    if re.search(r"\b(?:in|at|near|village of|town of)\s+(?:the\s+area\s+of\s+)?westbury\b", t):
+        return "Westbury"
+    if re.search(r"\b(?:in|at|near|village of|town of)\s+(?:the\s+area\s+of\s+)?wentbury\b", t):
+        return "Westbury"  # observed ASR repeat of the same Westbury job
     # A chapter/unit named Queens may respond across the Nassau line. A
     # dispatch-local "in Great Neck" names the JOB, not the responding unit.
     if re.search(r"\bin\s+(?:great|grape)\s+neck\b", t):
@@ -685,6 +693,34 @@ _LONE_STREET_RE = re.compile(
 def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None:
     """Best-effort dispatch location for one transcript chunk."""
     if profile == "fdny":
+        # A numbered NYCHA Walk is a full street address, including an
+        # internal number ("127 Kingsborough 1 Walk"). Match it before an
+        # unrelated street or a radio unit's apparent house-number fragment.
+        walks = list(re.finditer(
+            r"\b(\d{1,5})\s+([A-Za-z][A-Za-z'-]{2,}(?:\s+[A-Za-z][A-Za-z'-]{2,}){0,2})"
+            r"[,\s]+(\d{1,2}|one|two|three|four|five)(?:st|nd|rd|th)?\s+Walk\b", _norm(text), re.I))
+        if walks:
+            # First complete walk address is the incident anchor; later
+            # repeats in an overlapping recording do not make a new job.
+            m = walks[0]
+            n = int({"one": "1", "two": "2", "three": "3", "four": "4", "five": "5"}.get(m.group(3).lower(), m.group(3)))
+            suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+            walk_name = _addr_title(m.group(2))
+            # The address appears as Kingsboro/Kingsborough on this FDNY
+            # recording; the NYCHA street's canonical name is Kingsborough.
+            if walk_name.lower() == "kingsboro":
+                walk_name = "Kingsborough"
+            return _with_area(f"{m.group(1)} {walk_name} {n}{suffix} Walk", profile, text)
+        # ASR may omit the ordinal suffix inside a numbered South street:
+        # "330 South 3 Street". A distinct house number before the road is
+        # stronger than a later bare "Box 231, 330 South 3" readout. Keep
+        # the road's digit as heard; exact house verification is sender-owned.
+        south_house = re.search(
+            r"\b(\d{1,5})\s+(South)\s+(\d{1,2})\s+(Street|St)\b",
+            _norm(text), re.I)
+        if south_house:
+            return _with_area(f"{south_house.group(1)} South {south_house.group(3)} Street",
+                              profile, text)
         # A box readout is not a house number. When dispatch gives only a
         # bare numbered street with spoken crosses, preserve that street.
         # This pattern is scoped to the box+street readout; a separate spoken
@@ -795,6 +831,13 @@ def get_nature(text: str, profile: str = "") -> str:
     cleaned. Returns the matched phrase ('' when nothing is discernible).
     Cascade order is unchanged: content natures beat transmission types."""
     t = text.lower()
+    # Keep the dispatcher's entire medical complaint when a cardiac patient
+    # is described as not feeling well; the isolated "cardiac" word is not a
+    # diagnosis and the complaint must not lose its spoken qualifier.
+    m_card = re.search(r"\bcardiac\s+patient\s+(?:is\s+)?(?:not\s+feeling\s+well|"
+                       r"feeling\s+unwell|feels\s+unwell)\b", t)
+    if m_card:
+        return _addr_title(m_card.group(0))
     # 'firefighter(s)' on scene is not a fire nature (53rd St Hatzolah EMS job
     # posted as 'Fire' 9/28 off a whisper 'Firefight 253' fragment)
     t = re.sub(r"firefight(?:er|ers|ing)?", " ", t)
@@ -818,6 +861,10 @@ def get_nature(text: str, profile: str = "") -> str:
     v = vt(r"\b(?:person|pedestrian|ped)\s+struck\s+by\s+(?:a\s+)?train\b")
     if v: return v
     v = vt(r"\b(?:ped|pedestrian)\s+(?:struck|stricken|hit)\b")
+    if v: return v
+    v = vt(r"\b(?:cyclist|bicyclist)\s+(?:struck|hit)\b")
+    if v: return v
+    v = vt(r"\b(?:auto|vehicle|car)\s+extrication\b")
     if v: return v
     v = vt(r"\b(?:mva|mvc|motor vehicle accident|rollover|entrapment|car accident|auto accident|vehicle accident)\b")
     if v: return v
@@ -918,6 +965,10 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\bodou?r of gas\b")
     if v: return v
+    # Confirmed FDNY ASR variants for an audible "odor of gas" complaint.
+    # Only the complete two/three-word phrase qualifies, not generic "gas".
+    if profile == "fdny" and re.search(r"\b(?:notre(?:\s+dame)?|motor)\s+gas\b", t):
+        return "Odor of Gas"
     v = vt(r"\bgas leak\b")
     if v: return v
     # 'gas main (struck|ruptured|...)' is a content nature - box 3321 (9/28)
@@ -1185,6 +1236,32 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         full = re.findall(r"\bbox\s+(\d{4})\b", t, re.I)
         if full:
             t = re.sub(r"\bbox\s+\d{5,7}\b", "", t, flags=re.I)
+    if profile == "hatzolah":
+        # A unit label B50 paired with 18 is not the Boro Park grid corner.
+        # A separate complaint later in the clip cannot make it an address.
+        t = re.sub(r"\bB\s*50\s+and\s+18\b", "B50 / 18 units", t, flags=re.I)
+        # Williamsburg dispatch shorthand: only this map-testable road pair,
+        # with cyclist-struck complaint and explicit checking/dispatch phrasing.
+        # No historical backfill; sender independently verifies actual roads.
+        if re.search(r"\b(?:cyclist|bicyclist)\s+struck\b", t, re.I) and re.search(
+                r"\b(?:check\s+out|for|at|on)\s+(?:a\s+)?(?:cyclist|bicyclist)\s+struck\b", t, re.I):
+            t = re.sub(r"\bKent\s+and\s+Wilson\b",
+                       "Kent Avenue and Wilson Street", t, flags=re.I)
+            t = re.sub(r"\bWilson\s+and\s+Kent\b",
+                       "Kent Avenue and Wilson Street", t, flags=re.I)
+    # A numbered Brighton road is often spoken as an ordinal word without
+    # "Street" ("Brighton First and Brighton Beach Avenue"). Convert only
+    # in an explicit location pair that includes the full second road. The
+    # sender still has to verify both roads at one map intersection.
+    if profile == "hatzolah":
+        _BRIGHTON_ORD = {"first": "1st", "second": "2nd", "third": "3rd",
+                         "fourth": "4th", "fifth": "5th", "sixth": "6th",
+                         "seventh": "7th", "eighth": "8th", "ninth": "9th",
+                         "tenth": "10th"}
+        t = re.sub(r"\bBrighton\s+(first|second|third|fourth|fifth|sixth|seventh|"
+                   r"eighth|ninth|tenth)\s+(?:and|&)\s+Brighton Beach Avenue\b",
+                   lambda m: "Brighton " + _BRIGHTON_ORD[m.group(1).lower()]
+                             + " Street and Brighton Beach Avenue", t, flags=re.I)
     # A spoken location intersection outranks a lone street. For a repeated
     # same-street read in one dispatch, the last complete pair is the final
     # correction (Beach/Church -> Beach/Middle Neck). Do not mix different
@@ -1256,7 +1333,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                 street_part, re.I):
         logging.info("suppressed (type-only address): %s", addr)
         return None
-    if not box_only and not re.search(_T_ANY, street_part, re.I) \
+    if not box_only and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
             and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
         logging.info("suppressed (no street type): %s", addr)
         return None
@@ -1299,6 +1376,13 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
             apt = "Apartment " + m.group(1) + _PHONETIC[m.group(2).lower()]
     if apt and nature and profile == "fdny":
         nature = f"{nature}, {apt}"
+    if profile == "fdny" and nature:
+        mf = re.search(r"\b(?:the\s+)?(first|second|third|fourth|fifth|sixth|"
+                       r"seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th))\s+and\s+"
+                       r"(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|"
+                       r"\d+(?:st|nd|rd|th))\s+floors\b", t, re.I)
+        if mf and "floors" not in nature.lower():
+            nature += f", {mf.group(1).title()} and {mf.group(2).title()} Floors"
     fl = re.search(r"\bthe\s+((?:first|second|third|fourth|fifth|sixth|"
                    r"seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th))\s+floor)\b", t)
     if fl and nature and fl.group(1).lower() not in nature.lower():
@@ -1321,6 +1405,9 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "nature": nature,
         "apartment": apt if profile != "fdny" else "",
         "address": addr,
+        "area_defaulted": bool(profile == "hatzolah" and
+            get_hatzolah_area(t) == "Brooklyn" and not
+            re.search(r"\b(?:brooklyn|manhattan beach)\b", t, re.I)),
         # A verified, specifically named complex is more useful than the
         # adjacent highway alone. Preserve its service-road access only when
         # dispatch itself states both, not on an incidental tower mention.
@@ -1340,6 +1427,11 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
             if re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I) else ""),
         "priority": is_priority(t),
         "cross": cross,
+        "single_spoken_cross": (
+            re.search(r"\b(?:that'?s\s+)?at\s+((?:East|West|North|South|E|W|N|S)\s+"
+                      r"\d{1,3}(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", t, re.I).group(1)
+            if profile == "fdny" and re.search(r"\b(?:that'?s\s+)?at\s+((?:East|West|North|South|E|W|N|S)\s+"
+                      r"\d{1,3}(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", t, re.I) else ""),
         "direct_cross_candidate": direct_pair[1] if direct_pair else "",
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),

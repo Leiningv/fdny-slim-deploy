@@ -1217,6 +1217,52 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             hit.get("excerpt") or "", re.I):
         stats.event(profile, f"suppressed (Rockland dispatch): {hit['address']}")
         return "suppressed"
+    if profile.lower().removeprefix("zello-") in ("hatzolah", "hatzalah") and hit.get("area_defaulted"):
+        import locality_gate
+        # A bare NYC pair can name an exact point even if the borough was
+        # omitted. Prove both full road names at the same map node, and
+        # independently reverse-check the point's borough before using it.
+        pair_safe = False
+        bare_first = hit["address"].split(",", 1)[0]
+        candidate = hit.get("direct_cross_candidate") or ""
+        if candidate and not re.match(r"^\d+\s", bare_first) and bare_first.lower().endswith(
+                ("street", "avenue", "road", "boulevard", "drive", "place", "lane")):
+            try:
+                point = await asyncio.wait_for(
+                    _intersection_point(hit["address"], candidate), timeout=9)
+            except Exception:
+                point = (None, None)
+            if point[0] is not None:
+                try:
+                    import aiohttp
+                    async with aiohttp.ClientSession() as ses:
+                        async with ses.get("https://nominatim.openstreetmap.org/reverse",
+                                           params={"lat": point[0], "lon": point[1],
+                                                   "format": "json", "addressdetails": 1},
+                                           headers={"User-Agent": "fdny-slim/1.0 (dispatch monitor)"},
+                                           timeout=aiohttp.ClientTimeout(total=6)) as rsp:
+                            body = await rsp.json() if rsp.status == 200 else {}
+                    area = body.get("address") or {}
+                    pair_safe = area.get("city_district") == "Kings County" and area.get("state") == "New York"
+                except Exception:
+                    pair_safe = False
+        if not pair_safe and not await locality_gate.default_area_safe(hit, hit.get("excerpt") or ""):
+            stats.event(profile, f"suppressed (ambiguous default borough): {hit['address']}")
+            ops_log(f"suppressed (ambiguous default borough): {hit['address']}")
+            return "suppressed"
+    if profile == "fdny" and re.search(r"\b\d+(?:st|nd|rd|th)\s+Walk,", hit["address"], re.I):
+        # A reused overlapping clip may contain a separate numbered street
+        # job and a box for THAT job, then repeat a Walk address. Never tie
+        # its box to the Walk. A solitary Walk/box disagreement retains the
+        # existing warning behavior.
+        excerpt = hit.get("excerpt") or ""
+        walk_house = re.match(r"^(\d+)\s+", hit["address"])
+        others = re.findall(r"\b(\d{1,5})\s+(?:[A-Za-z][A-Za-z'-]*\s+){0,2}"
+                            r"(?:Street|St|Avenue|Ave|Road|Rd)\b", excerpt, re.I)
+        if walk_house and any(num != walk_house.group(1) for num in others) and hit.get("box_heard"):
+            stats.event(profile, f"suppressed (mixed Walk/other address): {hit['address']}")
+            ops_log(f"suppressed (mixed Walk/other address): {hit['address']}")
+            return "suppressed"
     if profile == "fdny" and hit.get("terminal_street_box_correlated"):
         # A user's specific reading of this garbled dispatch is still gated
         # by independent map and NYC box corroboration before any post.
@@ -1281,13 +1327,32 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             # is unavailable, verified stays false and alert is suppressed.
             verified_label = hit["address"] if verified else ""
             locality = hit["address"].split(",")[1].strip() if verified and "," in hit["address"] else ""
+            # Owner rule: a false spoken corner may still post the primary
+            # road, but only if that road independently verifies in the
+            # explicitly named area. Never print the false second road or a
+            # map-computed substitute. A defaulted locality gets no fallback.
+            if not verified and profile.lower().removeprefix("zello-") in ("hatzolah", "hatzalah") \
+                    and not hit.get("area_defaulted") and re.search(
+                        r"\b(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|"
+                        r"Drive|Dr|Place|Pl|Lane|Ln|Parkway|Pkwy|Court|Ct|Terrace|Ter|"
+                        r"Broadway)\b$", side_a, re.I):
+                primary = f"{side_a}, " + hit["address"].split(",", 1)[1].strip()
+                v0, s0, label0, la0, lo0, loc0 = await geocode_verify(primary, profile)
+                area0 = hit["address"].split(",")[1].strip()
+                if v0 and label0 and re.search(r"\b" + re.escape(area0) + r"\b", label0, re.I):
+                    hit["address"] = primary
+                    hit["cross"] = ""
+                    hit["direct_cross_candidate"] = ""
+                    hit["unresolved_spoken_corner_fallback"] = True
+                    verified, in_sullivan, verified_label, lat, lon, locality = v0, s0, label0, la0, lo0, loc0
+                    stats.event(profile, f"spoken corner unresolved; verified primary road only: {primary}")
         else:
             verified, in_sullivan, verified_label, lat, lon, locality = await geocode_verify(hit["address"], profile)
         if (verified and locality and profile.lower().startswith(("hatzalah", "zello-hatzalah"))
                 and locality.lower() not in ("brooklyn", "queens", "manhattan", "bronx", "new york", "staten island")):
             state_suffix = "NJ" if hit["address"].upper().endswith(", NJ") else "NY"
             fixed = re.sub(r",\s*[^,]+,\s*(?:NY|NJ)$", f", {locality}, {state_suffix}", hit["address"])
-            if fixed != hit["address"]:
+            if fixed != hit["address"] and not hit.get("unresolved_spoken_corner_fallback"):
                 logging.info("[%s] area corrected by geocode: %s -> %s", profile, hit["address"], fixed)
                 stats.event(profile, f"area corrected: {hit['address']} -> {fixed}")
                 hit["address"] = fixed
@@ -1310,17 +1375,47 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     # map cannot prove the second at a real intersection. The map-verification
     # result controls the printed second side; no fuzzy substitution.
     direct_candidate = (hit.get("direct_cross_candidate") or "").strip()
+    direct_pair_verified = False
     if direct_candidate and verified:
-        pair_point = await _intersection_point(hit["address"], direct_candidate)
+        try:
+            pair_point = await asyncio.wait_for(
+                _intersection_point(hit["address"], direct_candidate), timeout=9)
+        except Exception:
+            pair_point = (None, None)
+        if pair_point[0] is None and profile.lower().removeprefix("zello-") in ("hatzolah", "hatzalah"):
+            # One transient map failure may drop a spoken intersection. Never
+            # infer it merely from geocoding the first road.
+            await asyncio.sleep(0.5)
+            try:
+                pair_point = await asyncio.wait_for(
+                    _intersection_point(hit["address"], direct_candidate), timeout=9)
+            except Exception:
+                pair_point = (None, None)
         if pair_point[0] is not None:
             hit["address"] = hit["address"].replace(
                 hit["address"].split(",", 1)[0],
                 f"{hit['address'].split(',', 1)[0]} & {direct_candidate}", 1)
             lat, lon = pair_point
+            direct_pair_verified = True
             stats.event(profile, f"spoken intersection map-verified: {hit['address']}")
         else:
             stats.event(profile, f"spoken second street unverified: {direct_candidate}")
     cross = (hit.get("cross") or "").strip()
+    # A single directly spoken FDNY cross is never invented from a box row.
+    # Only keep it beside the selected box after a real road intersection
+    # independently verifies; failure leaves the box alone.
+    spoken_cross = (hit.get("single_spoken_cross") or "").strip() if profile == "fdny" else ""
+    spoken_cross_verified = False
+    if spoken_cross and verified and lat is not None and lon is not None:
+        base_road = re.sub(r"^\s*\d+[A-Za-z-]*\s+", "", hit["address"].split(",")[0])
+        try:
+            import spoken_cross as crossmap
+            spoken_cross_verified = await asyncio.wait_for(
+                crossmap.verify(base_road, spoken_cross, lat, lon), timeout=10)
+        except Exception:
+            spoken_cross_verified = False
+        if spoken_cross_verified:
+            stats.event(profile, f"spoken cross map-verified: {spoken_cross} at {base_road}")
     if " & " in hit["address"].split(",")[0] and cross.lower() == hit["address"].split(",")[0].lower():
         cross = ""  # the spoken intersection already IS the location line
     if cross and "&" not in cross and lat is not None and lon is not None \
@@ -1335,7 +1430,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             if other:
                 cross = f"{cross} & {other[0]}"
                 stats.event(profile, f"cross completed from map: {cross}")
-    if not cross and lat is not None and lon is not None and verified_label:
+    if not cross and not direct_pair_verified and not hit.get("unresolved_spoken_corner_fallback") \
+            and lat is not None and lon is not None and verified_label:
         street_core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"])
         street_core = re.sub(r"[,.;].*$", "", street_core).strip().lower()
         if street_core and street_core in verified_label.lower():
@@ -1373,10 +1469,11 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         # bare street ('53rd Street' + crosses '15th & 16th Avenue') - the
         # spoken intersection itself is the place; verify it on the map
         pt = await _intersection_point(hit["address"], cross)
-        if pt[0] is None and profile.lower().startswith(("hatzalah", "zello-hatzalah")):
+        if pt[0] is None and profile.lower().startswith(("hatzalah", "zello-hatzalah", "fdny")):
             # One fresh map retry for a directly spoken intersection after a
             # transient Overpass miss. Never turn an unresolved map result
-            # into a verified address.
+            # into a verified address. FDNY also needs this bounded retry;
+            # Willoughby/Wilson car fire missed when the first lookup failed.
             await asyncio.sleep(0.5)
             pt = await _intersection_point(hit["address"], cross)
         if pt[0] is not None:
@@ -1454,6 +1551,19 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             rows = []
         heard = hit.get("box_heard") or _heard_box(hit.get("excerpt") or "")
         if rows and heard:
+            # Reuse the earlier exact-house nearest-box corroboration for
+            # selection, not just the false-box hold gate.
+            house_box_agrees = False
+            if verified and re.match(r"^\d+\s+", hit["address"]) and lat is not None and lon is not None:
+                nearest, _near_loc, _dist = await _nearest_box(lat, lon, locality)
+                own_road = re.sub(r"^south\b", "s", re.sub(r"^north\b", "n",
+                           re.sub(r"^east\b", "e", re.sub(r"^west\b", "w",
+                           _street_core(hit["address"])))))
+                house_box_agrees = nearest == heard and any(
+                    own_road == re.sub(r"^south\b", "s", re.sub(r"^north\b", "n",
+                               re.sub(r"^east\b", "e", re.sub(r"^west\b", "w", _street_core(part)))))
+                    for place, bor in rows if bor.lower() == locality.lower()
+                    for part in re.split(r"\s+at\s+|&", place, flags=re.I))
             toks = _rare_tokens(f"{hit['address']} {cross} {verified_label}")
             inc_street = _street_core(verified_label or hit["address"])
             for loc, borough in rows:
@@ -1461,6 +1571,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 if (hit.get("terminal_street_box_correlated") and heard == "2685"
                         and borough == "Brooklyn" and "9 AVE" in loc.upper()
                         and "53 ST" in loc.upper()) or \
+                        (house_box_agrees and borough.lower() == locality.lower() and
+                         any(own_road == re.sub(r"^south\b", "s", re.sub(r"^north\b", "n",
+                             re.sub(r"^east\b", "e", re.sub(r"^west\b", "w", _street_core(part)))))
+                             for part in re.split(r"\s+at\s+|&", loc, flags=re.I))) or \
                         _box_row_matches_address_and_cross(loc, hit["address"], cross) or \
                         _rare_tokens(loc) & toks or \
                         (inc_street and inc_street in sides):
@@ -1612,6 +1726,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                             box_loc=box_loc if profile == "fdny" else "",
                             box_mismatch=box_mismatch if profile == "fdny" else False,
                             box_closest=box_closest if profile == "fdny" else False,
+                            box_cross=spoken_cross if spoken_cross_verified and profile == "fdny" else "",
                             audio_ts=(audio_ts if audio_ts is not None else fresh_ts)
                             if clip_name else None, spoken_time=hit.get("spoken_time") or "")
     verified_at = time.monotonic()
@@ -1663,6 +1778,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
 def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
                  footer: str | None = None, box: str = "", box_loc: str = "",
                  box_mismatch: bool = False, box_closest: bool = False,
+                 box_cross: str = "",
                  audio_ts: float | None = None, spoken_time: str = "") -> str:
     """User-picked layout (9/28, option 1): bold caps nature header with fire
     emoji; bold pinned address; plain 'between X & Y' crosses line; time;
@@ -1671,10 +1787,12 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     now = datetime.now(NY).strftime("%-I:%M %p")
     nature = (hit.get("nature") or "").strip().upper()
     addr_line = f"\N{ROUND PUSHPIN} *{hit['address']}*"
+    if (hit.get("source") or "").removeprefix("zello-") == "sullivan" and footer:
+        addr_line += f" ({footer})"
     if not confirmed:
         addr_line += " (not confirmed)"
     medical = re.search(
-        r"\b(?:breath(?:ing)?|cardiac|arrest|cpr|unresponsive|responsive|chok|"
+        r"\b(?:cyclist|bicyclist|breath(?:ing)?|cardiac|arrest|cpr|unresponsive|responsive|chok|"
         r"overdose|stroke|cva|seizure|convuls|fall|fell|bleeding|hemorrhage|"
         r"chest pain|drown|syncope|faint|passed out|diabet|sugar|allergic|"
         r"anaphyla|bee sting|abdominal|stomach|altered|disoriented|"
@@ -1695,6 +1813,8 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
             line += " (closest)"
         if box_loc:
             line += f" - {box_loc}"
+        if box_cross:
+            line += f" · at {box_cross}"
         lines.append(line)
         if box_mismatch:
             lines.append("\N{WARNING SIGN} spoken address not at box location")
@@ -1718,8 +1838,14 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         heard = (hit.get("excerpt") or "").lower()
         ems_dispatch = bool(re.search(r"\b(?:dispatch\s+to\s+empress|for\s+empress|ems\s+(?:call|response|dispatch)|als\s+response|bls\s+response)\b", heard))
         label = "EMS" if medical or ems_dispatch else "Sullivan FD"
-        if footer:
-            label += f" · {footer}"
+        if label == "EMS":
+            try:
+                import sullivan_tone
+                toned = sullivan_tone.toned_label(hit.get("excerpt") or "")
+                if toned:
+                    label += f" · {toned}"
+            except Exception as e:  # noqa: BLE001
+                logging.warning("Sullivan tone parser unavailable: %s", e)
     lines.append(f"_{label}_")
     # Presentation only: keep the spoken transcript and structured hit unchanged.
     text = "\n".join(lines)

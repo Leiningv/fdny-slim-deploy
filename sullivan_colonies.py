@@ -1088,6 +1088,12 @@ def _load_colony_address_entries() -> list[dict[str, str]]:
                             {
                                 "colony_name": str(row["colony_name"]).strip(),
                                 "address": str(row["address"]).strip(),
+                                "street": str(row.get("street", "")).strip(),
+                                "city": str(row.get("city", "")).strip(),
+                                "state": str(row.get("state", "")).strip(),
+                                "source": str(row.get("source", "")).strip(),
+                                "lat": row.get("lat"),
+                                "lon": row.get("lon"),
                             }
                         )
     except Exception:
@@ -1188,24 +1194,34 @@ def match_colony_for_verified_address(verified_address: str) -> ColonyMatchResul
     result = ColonyMatchResult(attempted=bool((verified_address or "").strip()))
     if not result.attempted:
         return result
-    job = (verified_address or "").split(",")[0].strip()
-    best: ColonyMatchResult | None = None
+    parts = [p.strip() for p in (verified_address or "").split(",")]
+    job = parts[0]
+    job_area = (parts[1] if len(parts) >= 3 else "").lower()
+    job_state = (parts[2].strip().split()[0].lower() if len(parts) >= 3 else "")
+    candidates: list[ColonyMatchResult] = []
     for row in _COLONY_ADDRESS_ENTRIES:
         colony_name = row["colony_name"]
         colony_addr = row["address"]
-        ok, conf = _addresses_match_for_colony(job, colony_addr)
+        raw = [p.strip() for p in colony_addr.split(",")]
+        if job_area and len(raw) >= 2:
+            raw_area = re.sub(r"\b[A-Z]{2}\b.*$", "", raw[1], flags=re.I).strip().lower()
+            raw_state = str(row.get("state") or "").strip().lower() or (
+                re.search(r"\b([A-Z]{2})\b", raw[-1], re.I).group(1).lower()
+                if re.search(r"\b([A-Z]{2})\b", raw[-1], re.I) else "")
+            if (raw_area and raw_area != job_area) or (job_state and raw_state and raw_state != job_state):
+                continue
+        ok, conf = _addresses_match_for_colony(job, raw[0])
         if not ok:
             continue
-        cand = ColonyMatchResult(
-            attempted=True,
-            found=True,
-            colony_name=colony_name,
-            colony_address=colony_addr,
-            matched_on=job,
-            confidence=conf,
-        )
-        if best is None or cand.confidence > best.confidence:
-            best = cand
+        candidates.append(ColonyMatchResult(
+            attempted=True, found=True, colony_name=colony_name,
+            colony_address=colony_addr, matched_on=job, confidence=conf))
+    # One street number can host several named sites. Address equality alone
+    # cannot pick one; leave the footer blank until an exact site is known.
+    names = {r.colony_name for r in candidates}
+    if len(names) > 1:
+        return result
+    best = candidates[0] if candidates else None
     if best:
         print(
             f"[COLONY] Matched {best.colony_name!r} — job {best.matched_on!r} "
@@ -1245,6 +1261,46 @@ def match_sullivan_colony(text: str) -> str | None:
     if seg_hits:
         return max(seg_hits, key=len)
     return None
+
+
+def unique_named_site_in_transcript(text: str, *, source_profile: str = "") -> dict | None:
+    """CHVAC name -> location candidate, never a posting authorization.
+
+    Exact full names only. Colliding names, out-of-Sullivan entries, generic
+    fragments and repeated entries are unresolved. Geocode and spoken-area
+    checks remain the caller's independent posting gates.
+    """
+    if source_profile.removeprefix("zello-") != "sullivan":
+        return None
+    spoken = _normalize_match_text(text)
+    if not spoken:
+        return None
+    candidates: list[dict] = []
+    for row in _COLONY_ADDRESS_ENTRIES:
+        name = _normalize_match_text(row["colony_name"])
+        if len(name) < 10 or not re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", spoken):
+            continue
+        candidates.append(row)
+    # If a longer name contains a shorter one, only the maximal literal match
+    # is relevant; then apply geographic and address gates. A longer foreign
+    # match must never fall back to a shorter in-county match.
+    maximal = [r for r in candidates if not any(
+        len(_normalize_match_text(o["colony_name"])) > len(_normalize_match_text(r["colony_name"]))
+        and _normalize_match_text(r["colony_name"]) in _normalize_match_text(o["colony_name"])
+        for o in candidates
+    )]
+    unique = {(r["colony_name"].lower(), r["address"].lower()): r for r in maximal}
+    if len(unique) != 1:
+        return None
+    match = next(iter(unique.values()))
+    # A bare base name cannot select one of several mapped entrances/camps.
+    match_name = _normalize_match_text(match["colony_name"])
+    if any(_normalize_match_text(r["colony_name"]).startswith(match_name + "-")
+           for r in _COLONY_ADDRESS_ENTRIES if r is not match):
+        return None
+    if not match.get("street") or not match.get("city") or match.get("state", "").upper() != "NY":
+        return None
+    return match
 
 
 def resolve_colony_for_alert(
