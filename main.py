@@ -28,13 +28,14 @@ import detect
 import ingest
 import transcribe
 import zello_ingest
-from status import ARCHIVE_DIR, ARCHIVE_KEEP, Stats, keepalive, start_web
+from status import ARCHIVE_DIR, ARCHIVE_KEEP, Stats, keepalive, start_web, plain_event
 
 _OPS_Q: list[str] = []
 _OPS_TASKS: list = []
 
 
 def ops_log(line: str) -> None:
+    line = plain_event(line)
     logging.info("ops: %s", line)
     _OPS_Q.append(line)
 
@@ -1203,8 +1204,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         return "suppressed"
     if not (hit.get("nature") or "").strip():
         logging.info("[%s] suppressed (no discernible nature): %s", profile, hit["address"])
-        stats.event(profile, f"suppressed (no nature): {hit['address']}")
-        ops_log(f"suppressed (no nature): {hit['address']}")
+        stats.event(profile, f"Held: Units were talking, but no clear complaint was said. Location heard: {hit['address']}.")
+        ops_log(f"Held: Units were talking, but no clear complaint was said. Location heard: {hit['address']}.")
         hit["hold_reason"] = "no nature"
         return "suppressed"
     if profile.lower().startswith(("hatzalah", "zello-hatzalah")) and \
@@ -1600,7 +1601,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 verified, in_sullivan = True, ins2
                 verified_label, lat, lon, locality = lbl2, la2, lo2, loc2
     if not cross:
-        ops_log(f"cross streets unresolved: {hit['nature']} @ {hit['address']}")
+        ops_log(f"No cross street was said clearly enough to verify for {hit['nature']} at {hit['address']}.")
     colony = None
     if profile.lower().startswith(("sullivan", "hatzalah", "zello-sullivan", "zello-hatzalah")):
         try:
@@ -1741,8 +1742,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     if not verified:
         reason = "unconfirmed, no box" if profile == "fdny" else "no verified location"
         logging.info("[%s] suppressed (%s): %s", profile, reason, hit["address"])
-        stats.event(profile, f"suppressed ({reason}): {hit['nature']} @ {hit['address']}")
-        ops_log(f"suppressed ({reason}): {hit['nature']} @ {hit['address']}")
+        stats.event(profile, f"Held: Heard {hit['address']}, but could not verify that location for {hit['nature']}.")
+        ops_log(f"Held: Heard {hit['address']}, but could not verify that location for {hit['nature']}.")
         hit["hold_reason"] = reason
         return "suppressed"
     box_closest = False
@@ -1939,6 +1940,132 @@ def _concat_pcm(a: Path, b: Path, out: Path) -> bool:
         return False
 
 
+def _ptt_group_match(rec: dict, started: float, addr: str, gap: float, nature: str = "") -> bool:
+    if started < rec["start"] or started - rec["stop"] > gap:
+        return False
+    if addr and rec["address"]:
+        if _street_core(addr) != _street_core(rec["address"]): return False
+        old_house = re.match(r"^\s*(\d+)\s+", rec["address"])
+        new_house = re.match(r"^\s*(\d+)\s+", addr)
+        if old_house and new_house and old_house.group(1) != new_house.group(1): return False
+    if nature and rec.get("nature") and nature.lower() != rec["nature"].lower():
+        return False
+    return bool((addr and rec["address"]) or (rec["opener"] and not rec["address"])
+                or (rec["opener"] and not addr))
+
+
+def _ptt_ready(profile: str) -> list[Path]:
+    """Only fully converted, metadata-backed transmissions; never read .part."""
+    return sorted((p for p in SEG_DIR.glob(f"{profile}-ptt-*.wav")
+                   if p.with_suffix(".json").exists() and p.stat().st_size > 44),
+                  key=lambda p: p.stat().st_mtime)
+
+
+async def ptt_consumer(profile: str, stats: Stats, seen: dict) -> None:
+    """Trial incident grouping over Zello stream IDs. Legacy segment consumer
+    continues independently and is the fallback on missing events or decode.
+    Group only same location or a clear opener followed by a bounded repeat;
+    never splice a separate address/nature into one job.
+    """
+    processed: set[str] = set()
+    pending: list[dict] = []
+    gap = max(0.5, min(zello_ingest.GROUP_TRIAL_SEC, 12.0))
+    opener = re.compile(r"\b(?:dispatch\s+to|units?\s+in|any\s+units?\s+in|"
+                        r"(?:sullivan|hatzalah)\s+dispatch)\b", re.I)
+    while True:
+        for wav in _ptt_ready(profile):
+            if wav.name in processed: continue
+            processed.add(wav.name)
+            if len(processed) > 500:
+                processed = {n for n in processed if (SEG_DIR / n).exists()}
+            try:
+                meta = json.loads(wav.with_suffix(".json").read_text())
+                started, stopped = float(meta["start"]), float(meta["stop"])
+                if not 0 < started <= stopped or time.time() - stopped > FRESH_LIVE_SEC:
+                    zello_ingest.stream_owner(profile, wav.stem, started, stopped, "failed")
+                    wav.unlink(missing_ok=True);wav.with_suffix(".json").unlink(missing_ok=True)
+                    continue
+                text = await asyncio.to_thread(transcribe.transcribe, wav, profile)
+                if not text:
+                    zello_ingest.stream_owner(profile, wav.stem, started, stopped, "failed")
+                    wav.unlink(missing_ok=True);wav.with_suffix(".json").unlink(missing_ok=True)
+                    continue
+                zello_ingest.stream_owner(profile, wav.stem, started, stopped, "owned")
+                stats.mark_segment(profile);stats.mark_transcript(profile, text)
+                await _kw_check(profile, text)
+                hit = detect.analyze(text, profile)
+                addr = (hit or {}).get("address", "")
+                nature = (hit or {}).get("nature", "")
+                matched = None
+                for rec in pending:
+                    if _ptt_group_match(rec, started, addr, gap, nature):
+                        matched = rec;break
+                if matched:
+                    matched["wav"].append(wav);matched["stop"] = stopped
+                    matched["text"] += " " + text
+                    matched["address"] = addr or matched["address"]
+                    matched["nature"] = nature or matched["nature"]
+                else:
+                    pending.append({"start":started,"stop":stopped,"wav":[wav],
+                                    "text":text,"address":addr,"nature":nature,
+                                    "opener":bool(opener.search(text))})
+            except Exception as e:
+                logging.warning("[%s] PTT consumer error: %s", profile, e)
+                try:
+                    bad_meta = json.loads(wav.with_suffix(".json").read_text())
+                    zello_ingest.stream_owner(profile, wav.stem, float(bad_meta["start"]),
+                                              float(bad_meta["stop"]), "failed")
+                except Exception:
+                    pass
+        for rec in list(pending):
+            if time.time() - rec["stop"] < gap + zello_ingest.TAIL_SEC: continue
+            pending.remove(rec)
+            target=rec["wav"][0]
+            try:
+                text=rec["text"]
+                hits = [detect.analyze(span, profile) for span in detect.split_dispatch_jobs(text, profile)]
+                target=rec["wav"][0]
+                if len(rec["wav"]) > 1:
+                    grouped=SEG_DIR / f"ptt-group-{profile}-{int(rec['start']*1000)}.wav"
+                    import wave
+                    with wave.open(str(grouped), 'wb') as wo:
+                        wo.setnchannels(1);wo.setsampwidth(2);wo.setframerate(16000)
+                        for part in rec["wav"]:
+                            with wave.open(str(part),'rb') as wi:
+                                wo.writeframes(wi.readframes(wi.getnframes()))
+                    target=grouped
+                clip_name = f"{profile}-ptt-{int(rec['start']*1000)}.wav"
+                await asyncio.to_thread(_archive_clip,target,clip_name)
+                stats.mark_clip(profile,clip_name,text)
+                for hit in hits:
+                    if not hit:continue
+                    key=f"{profile}|{hit['nature']}|{hit['address']}"
+                    now=time.time()
+                    if now-seen.get(key,0)<DEDUP_SEC:continue
+                    seen[key]=now;_save_seen(seen)
+                    outcome=await verify_and_send(profile,hit,stats,clip_name,
+                                                   fresh_ts=rec["start"],audio_ts=rec["start"])
+                    ok=outcome=="sent"
+                    if outcome=="suppressed":hit["voice_url"]=await _held_recording(clip_name)
+                    stats.mark_alert(profile,hit["nature"],hit["address"],ok,
+                                     voice_url=hit.get("voice_url",""),failed=(outcome=="queued"),
+                                     outcome=outcome,reason=hit.get("hold_reason",""))
+                    _append_alert_log({"t":now,"feed":profile,"nature":hit["nature"],
+                                       "address":hit["address"],"sent":ok,"excerpt":hit["excerpt"]})
+            except Exception as e:
+                logging.warning("[%s] PTT grouped dispatch error: %s",profile,e)
+            finally:
+                # Completed incident is kept in ARCHIVE_DIR and uploaded by
+                # send/hold; raw PTT pieces are transient and must not fill
+                # Render's small free-tier filesystem.
+                for part in rec["wav"]:
+                    part.unlink(missing_ok=True)
+                    part.with_suffix(".json").unlink(missing_ok=True)
+                if target != rec["wav"][0]:
+                    target.unlink(missing_ok=True)
+        await asyncio.sleep(1)
+
+
 async def consumer(profile: str, stats: Stats, seen: dict) -> None:
     """Pick up finished segments for one feed, transcribe pairs, detect, alert.
 
@@ -1955,6 +2082,20 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
             mtime = wav.stat().st_mtime
             if processed.get(wav.name) == mtime:
                 continue
+            # The old ring is strictly fallback. A completed PTT file close
+            # to this ring segment means the same audio is already handled by
+            # the stream-ID consumer. On a stalled/missing PTT decode, allow
+            # the old ring after a bounded 30s wait. Never race a pending PTT
+            # group's verify/send just because transcription is slow.
+            if profile in zello_ingest.CHANNELS:
+                age = time.time() - mtime
+                ownership = zello_ingest.stream_owner_state(profile, mtime)
+                if ownership == "owned":
+                    processed[wav.name] = mtime
+                    prev = None  # never pair fallback with audio owned by PTT
+                    continue
+                if ownership == "pending" or age < 30:
+                    continue
             processed[wav.name] = mtime
             if len(processed) > ingest.SEG_WRAP * 2:
                 for name in list(processed):
@@ -2457,6 +2598,7 @@ async def amain() -> None:
     await asyncio.gather(
         *(consumer(p, stats, seen) for p in hls_profiles),
         *(consumer(p, stats, seen) for p in zello_ingest.CHANNELS),
+        *(ptt_consumer(p, stats, seen) for p in zello_ingest.CHANNELS),
         fdny_consumer(stats, seen),
         keepalive(stats),
         waha_watch(stats),
