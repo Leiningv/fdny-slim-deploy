@@ -2012,17 +2012,12 @@ def _fdny_fetch_clip(url: str, m4a: Path, wav: Path) -> Path | None:
 
 
 async def _fdny_independent_hearing(wav: Path) -> str:
-    """Higher-resolution local ASR for disputed FDNY speech, no cloud call.
+    """Disabled on the free service: small.en exceeded its memory limit.
 
-    The default tiny model lost Pitkin on the Barbey clip. A separate small
-    model is slower, so only call it for an added qualifier or spelling doubt.
+    Do not substitute the primary tiny.en model as independent evidence.
+    Disputed FDNY details are held in _fdny_handle_call for review.
     """
-    def run() -> str:
-        from faster_whisper import WhisperModel
-        model = WhisperModel("small.en", device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(str(wav), beam_size=3, vad_filter=True)
-        return " ".join(s.text.strip() for s in segments).strip()
-    return await asyncio.wait_for(asyncio.to_thread(run), timeout=45)
+    return ""
 
 
 async def _fdny_repair_brooklyn_street(hit: dict, wav: Path, stats: Stats,
@@ -2228,23 +2223,9 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             stats.event("fdny", f"detect error: {e}")
     parsed_at = time.monotonic()
     wav = await fetch_task if fetch_task else None
-    if hit and wav is not None:
-        needs_qual = bool(re.search(r"\b(?:apartment|apt\.?|floors?|basement|cellar|dwelling)\b",
-                                    hit.get("nature") or "", re.I))
-        needs_street = bool(re.fullmatch(
-            r"\d{1,5}\s+[A-Za-z][A-Za-z' -]+?\s+"
-            r"(?:Street|Avenue|Road|Place|Drive|Court), Brooklyn, NY",
-            hit.get("address") or "", re.I))
-        if needs_qual or needs_street:
-            try:
-                second = await _fdny_independent_hearing(wav)
-            except Exception as e:
-                logging.warning("[fdny] independent hearing failed (%s)", e)
-                second = ""
-            if needs_qual:
-                await _fdny_recheck_qualifiers(hit, wav, stats, second=second)
-            if needs_street:
-                await _fdny_repair_brooklyn_street(hit, wav, stats, second=second)
+    # No second recognizer runs in production on the free memory tier.
+    # In particular, ordinary Brooklyn calls must not load small.en just
+    # because their address contains a named street.
     fetched_at = time.monotonic()
     if not text and wav is not None:
         text = await asyncio.to_thread(transcribe.transcribe, wav)
@@ -2284,6 +2265,33 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
         return
     seen[key] = now
     _save_seen(seen)
+    # A single vendor transcript is not proof for exact floor/apartment/
+    # occupancy detail. A failed named-street lookup is likewise not license
+    # to correct spelling from a nearby map result without another hearing.
+    # Hold these disputed cases on Dispatch Control with the recording.
+    nature = hit.get("nature") or ""
+    address = hit.get("address") or ""
+    hold_reason = ""
+    if re.search(r"\b(?:apartment|apt\.?|floors?|basement|cellar|dwelling)\b", nature, re.I):
+        hold_reason = "FDNY qualifier needs independent audio check"
+    elif re.fullmatch(r"\d{1,5}\s+[A-Za-z][A-Za-z' -]+?\s+"
+                      r"(?:Street|Avenue|Road|Place|Drive|Court), Brooklyn, NY", address, re.I):
+        try:
+            verified_street = bool((await geocode_verify(address, "fdny"))[0])
+        except Exception:
+            verified_street = False
+        if not verified_street:
+            hold_reason = "FDNY street spelling needs independent audio check"
+    if hold_reason:
+        hit["hold_reason"] = hold_reason
+        stats.event("fdny", f"held ({hold_reason}): {nature} @ {address}")
+        ops_log(f"held ({hold_reason}): {nature} @ {address}")
+        hit["voice_url"] = await _held_recording(clip_name)
+        stats.mark_alert("fdny", nature, address, False, failed=False, outcome="suppressed",
+                         voice_url=hit.get("voice_url", ""), reason=hold_reason)
+        _append_alert_log({"t": now, "feed": "fdny", "nature": nature,
+                           "address": address, "sent": False, "excerpt": hit["excerpt"]})
+        return
     try:
         call_ts = float(call.get("ts") or 0) or None
         audio_start = float(call.get("audio_start_ts") or 0) or None
