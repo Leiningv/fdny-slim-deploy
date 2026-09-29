@@ -1401,6 +1401,14 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             return "suppressed"
         if not verified:
             stats.event(profile, f"unconfirmed address: {hit['address']}")
+    if profile == "fdny" and verified and GEOCODE_VERIFY:
+        from fdny_borough_gate import exact_numbered_fdny_match
+        if not exact_numbered_fdny_match(hit["address"], verified_label):
+            reason = "map did not confirm the exact FDNY house and street"
+            stats.event(profile, f"Held: {reason}: {hit['address']} (map: {verified_label})")
+            ops_log(f"Held: {reason}: {hit['address']} (map: {verified_label})")
+            hit["hold_reason"] = reason
+            return "suppressed"
     # A directly spoken X and Y pair: keep the verified first street if the
     # map cannot prove the second at a real intersection. The map-verification
     # result controls the printed second side; no fuzzy substitution.
@@ -1688,6 +1696,14 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                             + "; ".join(f"{l} ({b})" for l, b in rows))
                 ops_log(f"box mismatch (not posted): heard Box {heard} @ {hit['address']}, "
                         f"lookup: " + "; ".join(f"{l} ({b})" for l, b in rows))
+            from fdny_borough_gate import box_street_conflict
+            if (verified and not box_disp and
+                    box_street_conflict(hit["address"], locality, rows)):
+                reason = "spoken FDNY box conflicts with the verified street"
+                stats.event(profile, f"Held: {reason}: Box {heard} @ {hit['address']}")
+                ops_log(f"Held: {reason}: Box {heard} @ {hit['address']}")
+                hit["hold_reason"] = reason
+                return "suppressed"
         elif heard:
             garbage_box = True
             logging.info("[%s] box %s not in lookup DB - not posted", profile, heard)
@@ -1738,7 +1754,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         return "suppressed"
     # A verified address is mandatory. A box alone cannot rehabilitate an
     # unverified ASR road spelling. A mismatched box is omitted, not swapped
-    # for another guessed box; a truly absent box still uses nearest lookup.
+    # for another guessed box; an absent box is never guessed.
     if not verified:
         reason = "unconfirmed, no box" if profile == "fdny" else "no verified location"
         logging.info("[%s] suppressed (%s): %s", profile, reason, hit["address"])
@@ -1746,40 +1762,17 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         ops_log(f"Held: Heard {hit['address']}, but could not verify that location for {hit['nature']}.")
         hit["hold_reason"] = reason
         return "suppressed"
-    box_closest = False
-    if profile == "fdny" and not box_disp and not garbage_box:
-        nb_digits = nb_loc = None
-        if verified and lat is not None and lon is not None:
-            nb_digits, nb_loc, _ = await _nearest_box(lat, lon, locality)
-        if nb_digits:
-            box_disp = nb_digits
-            # When the selected box's documented street corroborates this
-            # verified address, don't label it "closest" (user's 1610 ruling).
-            def _box_road_key(street):
-                road = _street_core(street).lower()
-                for suffix, long in ((" pl", " place"), (" ave", " avenue"),
-                                     (" st", " street"), (" rd", " road"),
-                                     (" blvd", " boulevard"), (" dr", " drive")):
-                    if road.endswith(suffix):
-                        road = road[:-len(suffix)] + long
-                return road
-            own_street = _box_road_key(hit["address"])
-            row_streets = {_box_road_key(part) for part in
-                           re.split(r"\s+at\s+|&", nb_loc or "", flags=re.I)}
-            # A street intersection may match one side of a nearby box.
-            # Keep '(closest)' unless this specific job's street itself
-            # corroborates the box location, not merely an adjacent road.
-            box_closest = not (own_street and own_street in row_streets)
-            stats.event(profile, f"closest box lookup: Box {nb_digits} - {nb_loc} "
-                                 f"for {hit['address']}")
-            ops_log(f"closest box lookup: Box {nb_digits} - {nb_loc} for {hit['address']}")
-        else:
-            logging.info("[%s] suppressed (FDNY, no box obtainable): %s @ %s",
-                         profile, hit["nature"], hit["address"])
-            stats.event(profile, f"suppressed (no box obtainable): {hit['nature']} @ {hit['address']}")
-            ops_log(f"suppressed (no box obtainable): {hit['nature']} @ {hit['address']}")
-            hit["hold_reason"] = "no box obtainable"
+    if profile == "fdny" and GEOCODE_VERIFY:
+        from fdny_borough_gate import exact_numbered_fdny_match
+        if not exact_numbered_fdny_match(hit["address"], verified_label):
+            reason = "map did not confirm the exact FDNY house and street"
+            stats.event(profile, f"Held: {reason}: {hit['address']} (map: {verified_label})")
+            ops_log(f"Held: {reason}: {hit['address']} (map: {verified_label})")
+            hit["hold_reason"] = reason
             return "suppressed"
+    # A nearby map box is not a box spoken for this dispatch. Do not add one,
+    # and never hold a verified address solely because no box was obtainable.
+    box_closest = False
     if profile == "fdny" and verified and garbage_box and not box_disp:
         stats.event(profile, f"verified address posting without untrusted box: {hit['address']}")
     # North Shore Towers is a documented complex reached from the Grand
@@ -2440,16 +2433,29 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
         return
     seen[key] = now
     _save_seen(seen)
-    # A single vendor transcript is not proof for exact floor/apartment/
-    # occupancy detail. A failed named-street lookup is likewise not license
-    # to correct spelling from a nearby map result without another hearing.
-    # Hold these disputed cases on Dispatch Control with the recording.
+    # Keep explicit address-conflict and numbered-cross guards. A spoken
+    # apartment or floor alone does not hold the job; it is posted when heard,
+    # and omitted when absent. Other unsupported dwelling/basement qualifiers
+    # retain their independent-review gate.
     nature = hit.get("nature") or ""
     address = hit.get("address") or ""
-    hold_reason = ""
-    if re.search(r"\b(?:apartment|apt\.?|floors?|basement|cellar|dwelling)\b", nature, re.I):
-        hold_reason = "FDNY qualifier needs independent audio check"
-    elif re.fullmatch(r"\d{1,5}\s+[A-Za-z][A-Za-z' -]+?\s+"
+    from fdny_borough_gate import spoken_borough_conflict, unnumbered_with_spoken_building
+    conflict = spoken_borough_conflict(text, address)
+    numbered_heard = unnumbered_with_spoken_building(text, address)
+    hold_reason = (f"FDNY address says Brooklyn but dispatch says {conflict}"
+                   if conflict else (f"FDNY dispatch gave a numbered building ({numbered_heard}) "
+                                     "but the parsed address lost its number"
+                                     if numbered_heard else ""))
+    # A single vendor ASR reading can drop a digit in a numbered cross (East
+    # 22nd -> East 2nd). Without a second audio recognizer on the free tier,
+    # hold that location detail instead of publishing a false block.
+    if not hold_reason and re.search(
+            r"\b(?:East|West|North|South|E|W|N|S)\s+\d{1,3}(?:st|nd|rd|th)?\s+"
+            r"(?:Street|St|Avenue|Ave|Road|Rd)\b", hit.get("cross") or "", re.I):
+        hold_reason = "FDNY numbered cross street needs an independent audio check"
+    if not hold_reason and re.search(r"\b(?:basement|cellar|dwelling)\b", nature, re.I):
+        hold_reason = "FDNY dwelling detail needs independent audio check"
+    elif not hold_reason and re.fullmatch(r"\d{1,5}\s+[A-Za-z][A-Za-z' -]+?\s+"
                       r"(?:Street|Avenue|Road|Place|Drive|Court), Brooklyn, NY", address, re.I):
         try:
             verified_street = bool((await geocode_verify(address, "fdny"))[0])

@@ -955,6 +955,11 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\b(?:unresponsive|not responsive)\b")
     if v: return v
+    # Sullivan EMS dispatch: "man down, unknown life status" is a spoken
+    # complaint, not a diagnosis. Preserve exactly the supplied uncertainty.
+    if profile == "sullivan":
+        v = vt(r"\bman down(?:,?\s+unknown life status)?\b")
+        if v: return v
     if ("hatzal" in profile.lower() or "hatzol" in profile.lower()) and \
             re.search(r"\b(?:patient|child|kid|baby|person|infant)\b.{0,30}\bnot acting right\b", t):
         v = vt(r"\bnot acting right\b")
