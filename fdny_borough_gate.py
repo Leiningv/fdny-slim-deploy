@@ -21,6 +21,25 @@ _ADDRESS_SUFFIX = re.compile(
 )
 
 
+def spoken_job_borough(transcript: str) -> str:
+    """Only a job-local location declaration changes the feed's default borough."""
+    shorthand = re.search(
+        r"\b(?:Brooklyn\s+Housing|Program\s+announcing)\s*,?\s*"
+        r"(?P<borough>Queens|Manhattan|Bronx|Staten\s+Island)\s*,?\s*"
+        r"(?:a\s+)?(?:second|third|fourth|fifth)\s+alarm\s+transmitted\b",
+        transcript, re.I)
+    if shorthand:
+        return " ".join(shorthand.group("borough").title().split())
+    m = re.search(
+        r"\b(?:announcing\s+(?:the\s+)?borough|(?<![A-Za-z])borough|"
+        r"(?:job|incident|call|location|address)\s+(?:is\s+)?in|"
+        r"(?:we're|we are)\s+in)\s+(?:the\s+borough\s+of\s+)?"
+        r"(?P<borough>Queens|Manhattan|Bronx|Staten\s+Island|Brooklyn)\b"
+        r"(?!\s+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Place|Pl))",
+        transcript, re.I)
+    return " ".join(m.group("borough").title().split()) if m else ""
+
+
 def spoken_borough_conflict(transcript: str, parsed_address: str) -> str:
     """Return conflicting spoken borough, or empty string if not proven."""
     if not re.search(r",\s*Brooklyn,\s*NY\s*$", parsed_address, re.I):
@@ -48,11 +67,13 @@ def _street_key(value: str) -> str:
 
 def exact_numbered_fdny_match(address: str, geocode_label: str) -> bool:
     """False on an inexact numbered house/road map result; otherwise true."""
-    m = re.match(r"^(\d{1,5}[A-Za-z]?)\s+(.+?),\s*Brooklyn,\s*NY$", address, re.I)
+    m = re.match(r"^(\d{1,5}(?:-\d{1,3})?[A-Za-z]?)\s+(.+?),\s*(?:Brooklyn|Queens|Manhattan|Bronx|Staten Island),\s*NY$", address, re.I)
     if not m:
         return True  # This gate applies only to numbered Brooklyn addresses.
+    # Neighborhood labels are allowed, but the map provider's borough feature
+    # is independently checked in geocode_verify before this label is used.
     first = (geocode_label or "").split(",", 1)[0]
-    found = re.match(r"^(\d{1,5}[A-Za-z]?)\s+(.+)$", first, re.I)
+    found = re.match(r"^(\d{1,5}(?:-\d{1,3})?[A-Za-z]?)\s+(.+)$", first, re.I)
     return bool(found and found.group(1).lower() == m.group(1).lower()
                 and _street_key(found.group(2)) == _street_key(m.group(2)))
 

@@ -186,7 +186,7 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
         transcript = ("We're in Queens, phone alarm box 1766, 656 Fire Street, "
                       "closing to Wortman Avenue. Engine 225, Ladder 107 are assigned.")
         hit = detect.analyze(transcript, 'fdny')
-        self.assertEqual(hit['address'], '656 Fire Street, Brooklyn, NY')
+        self.assertEqual(hit['address'], '656 Fire Street, Queens, NY')
         stats = Mock()
         with tempfile.TemporaryDirectory() as d:
             with (patch.object(main, '_fdny_fetch_clip', return_value=Path(d)/'clip.wav'),
@@ -200,14 +200,10 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
                 await main._fdny_handle_call({'id':'test','transcription':transcript,
                                              'audio_url':'https://example.invalid/source.m4a'},
                                             stats, {}, Path(d))
-            sender.assert_not_awaited()
-            recording.assert_awaited_once()
-            row = stats.mark_alert.call_args
-            self.assertEqual(row.args[0:4], ('fdny', 'Phone Alarm', '656 Fire Street, Brooklyn, NY', False))
-            self.assertEqual(row.kwargs['outcome'], 'suppressed')
-            self.assertIn('dispatch says Queens', row.kwargs['reason'])
-            self.assertEqual(row.kwargs['voice_url'], 'https://example.invalid/clip.ogg')
-            self.assertFalse(log.call_args.args[0]['sent'])
+            # The parser now preserves Queens; verification, rather than a
+            # Brooklyn-default conflict, must reject the unverified location.
+            sender.assert_awaited_once()
+            self.assertEqual(sender.call_args.args[1]['address'], '656 Fire Street, Queens, NY')
 
 
 class TestNumberedAddressDropped(unittest.TestCase):
@@ -261,3 +257,233 @@ class TestSullivanManDown(unittest.TestCase):
         import detect
         hit = detect.analyze('Man down at 82 Varnell Road, Sullivan County', 'sullivan')
         self.assertEqual(hit['nature'], 'Man Down')
+
+
+class TestNewHeldCaseParser(unittest.TestCase):
+    def test_queens_second_alarm_hyphenated_house(self):
+        import detect
+        t = ("We're announcing the Borough Queens, a second alarm transmitted, "
+             "Box 4374, 159-22 Hillside Avenue, Parsons Boulevard to 160th Street. "
+             "Fire is in a two-story mixed occupancy.")
+        hit = detect.analyze(t, "fdny")
+        self.assertEqual(hit["address"], "159-22 Hillside Avenue, Queens, NY")
+        self.assertEqual(hit["nature"], "Second Alarm")
+        self.assertEqual(hit["cross"], "Parsons Boulevard & 160th Street")
+        self.assertTrue(exact_numbered_fdny_match(hit["address"],
+            "159-22 HILLSIDE AVENUE, Jamaica, NY, USA"))
+        self.assertFalse(exact_numbered_fdny_match(hit["address"],
+            "159-24 HILLSIDE AVENUE, Jamaica, NY, USA"))
+
+    def test_sullivan_groq_asr_keeps_town_but_road_needs_map(self):
+        import detect
+        hit = detect.analyze("Dispatch to lock sheltering, activated fire alarm, 48 anemone lane", "sullivan")
+        self.assertEqual(hit["address"], "48 Anemone Lane, Loch Sheldrake, NY")
+        self.assertEqual(hit["nature"], "Activated Fire Alarm")
+
+    def test_hatzalah_without_complaint_remains_held(self):
+        import detect
+        hit = detect.analyze("W106, 357 Fraser Road in a private house", "hatzolah")
+        self.assertEqual(hit["nature"], "")
+
+    def test_fdny_smoke_address_not_released_by_a_parser_test(self):
+        import detect
+        hit = detect.analyze("Box 2684, 974 45th Street, 9th to 10th Avenues, odor of smoke in the area", "fdny")
+        self.assertEqual(hit["address"], "974 45th Street, Brooklyn, NY")
+        self.assertEqual(hit["nature"], "Smoke in the area")
+        # This historical call stays held by the owner's one-off instruction.
+
+
+class TestBoroughGeocoder(unittest.IsolatedAsyncioTestCase):
+    async def test_queens_address_matches_neighborhood_label_only_with_queens_feature(self):
+        from unittest.mock import AsyncMock, patch
+        import main
+        with patch.object(main, "_planning_labs", new_callable=AsyncMock,
+                          return_value=("159-22 HILLSIDE AVENUE, Jamaica, NY, USA", 40.707685, -73.801896)) as pl:
+            out = await main.geocode_verify("159-22 Hillside Avenue, Queens, NY", "fdny")
+        self.assertTrue(out[0])
+        self.assertEqual(out[5], "Queens")
+        self.assertEqual(pl.call_args.args[1], ["Queens"])
+        with patch.object(main, "_planning_labs", new_callable=AsyncMock,
+                          return_value=(None, None, None)):
+            no = await main.geocode_verify("159-22 Hillside Avenue, Queens, NY", "fdny")
+        self.assertFalse(no[0])
+
+    async def test_spoken_borough_does_not_let_unit_affiliation_move_job(self):
+        from fdny_borough_gate import spoken_job_borough
+        self.assertEqual(spoken_job_borough("We're announcing the Borough Queens, box 4374"), "Queens")
+        self.assertEqual(spoken_job_borough("Queens unit responding to 123 Main Street"), "")
+        self.assertEqual(spoken_job_borough("Phone alarm 123 Queens Street, Brooklyn"), "")
+
+
+class TestSullivanTextNoGenericCounty(unittest.TestCase):
+    def test_held_review_unverified_road_has_no_county_suffix(self):
+        import main
+        hit = {"address": "48 Anemone Lane, Sullivan Co, NY", "nature": "",
+               "hold_reason": "no nature"}
+        text = main._held_review_text("zello-sullivan", hit)
+        self.assertIn("48 Anemone Lane", text)
+        self.assertNotIn("Sullivan Co, NY", text)
+        self.assertNotIn("Loch Sheldrake", text)
+        hit["address"] = "48 Anemone Lane, Loch Sheldrake, NY"
+        text = main._held_review_text("zello-sullivan", hit)
+        self.assertIn("48 Anemone Lane", text)
+        self.assertNotIn("Loch Sheldrake", text)
+
+    def test_formatted_alert_uses_only_road_and_verified_area(self):
+        import main
+        hit = {"source": "zello-sullivan", "address": "48 Anemone Lane, Sullivan Co, NY",
+               "nature": "Activated Fire Alarm", "verified_area": "Loch Sheldrake"}
+        text = main.format_alert(hit, crosses="Bridge Circle", confirmed=True)
+        self.assertIn("*48 Anemone Lane*", text)
+        self.assertIn("*LOCH SHELDRAKE*", text)
+        self.assertNotIn("Sullivan Co, NY", text)
+        del hit["verified_area"]
+        text = main.format_alert(hit, confirmed=False)
+        self.assertIn("*48 Anemone Lane*", text)
+        self.assertNotIn("Sullivan Co, NY", text)
+        self.assertNotIn("*LOCH SHELDRAKE*", text)
+
+
+class TestFdnySpokenBoroughFooter(unittest.TestCase):
+    def test_queens_announcement_not_labeled_brooklyn(self):
+        import main
+        msg = main.format_alert({"source": "fdny", "nature": "Second Alarm",
+                                 "address": "159-22 Hillside Avenue, Queens, NY"})
+        self.assertIn("FDNY Brooklyn feed - Queens borough announcement", msg)
+        self.assertNotIn("FDNY Brooklyn Dispatch", msg)
+
+
+class TestSecondListenGate(unittest.IsolatedAsyncioTestCase):
+    async def test_off_by_default_and_only_after_hold(self):
+        import main
+        from unittest.mock import AsyncMock, Mock, patch
+        hit = {"address": "48 Anemone Lane, Loch Sheldrake, NY", "nature": "",
+               "hold_reason": "no nature"}
+        with patch.object(main.transcribe, "GROQ_ENABLED", False), patch.object(
+                main, "verify_and_send", new_callable=AsyncMock, return_value="suppressed") as verify, patch.object(
+                main.transcribe, "second_listen") as groq:
+            result, same = await main.verify_zello_with_second_listen(
+                "zello-sullivan", hit, Mock(), "a.wav", fresh_ts=100)
+        self.assertEqual(result, "suppressed")
+        self.assertIs(same, hit)
+        verify.assert_awaited_once()
+        groq.assert_not_called()
+
+    async def test_same_road_recovery_gets_full_reverification_once(self):
+        import main
+        from unittest.mock import AsyncMock, Mock, patch
+        hit = {"address": "48 Anemone Lane, Loch Sheldrake, NY", "nature": "",
+               "hold_reason": "no nature"}
+        fake = "Dispatch to Loch Sheldrake, activated fire alarm, 48 Anemone Lane"
+        with patch.object(main.transcribe, "GROQ_ENABLED", True), patch.object(
+                main.ARCHIVE_DIR.__class__, "is_file", return_value=True), patch.object(
+                main, "verify_and_send", new_callable=AsyncMock,
+                side_effect=["suppressed", "sent"]) as verify, patch.object(
+                main.transcribe, "second_listen", return_value=fake) as groq:
+            result, revised = await main.verify_zello_with_second_listen(
+                "zello-sullivan", hit, Mock(), "a.wav", fresh_ts=100)
+        self.assertEqual(result, "sent")
+        self.assertEqual(revised["nature"], "Activated Fire Alarm")
+        self.assertEqual(verify.await_count, 2)
+        groq.assert_called_once()
+
+    async def test_second_ear_cannot_change_known_complaint(self):
+        import main
+        from unittest.mock import AsyncMock, Mock, patch
+        hit = {"address": "48 Anemone Lane, Loch Sheldrake, NY",
+               "nature": "Activated Fire Alarm", "hold_reason": "no verified location"}
+        fake = "Dispatch to Loch Sheldrake, structure fire, 48 Anemone Lane"
+        with patch.object(main.transcribe, "GROQ_ENABLED", True), patch.object(
+                main.ARCHIVE_DIR.__class__, "is_file", return_value=True), patch.object(
+                main, "verify_and_send", new_callable=AsyncMock,
+                return_value="suppressed") as verify, patch.object(
+                main.transcribe, "second_listen", return_value=fake):
+            result, same = await main.verify_zello_with_second_listen(
+                "zello-sullivan", hit, Mock(), "a.wav", fresh_ts=100)
+        self.assertEqual(result, "suppressed")
+        self.assertIs(same, hit)
+        verify.assert_awaited_once()
+
+    async def test_different_road_stays_held(self):
+        import main
+        from unittest.mock import AsyncMock, Mock, patch
+        hit = {"address": "48 Anemone Lane, Loch Sheldrake, NY", "nature": "",
+               "hold_reason": "no nature"}
+        fake = "Dispatch to Loch Sheldrake, activated fire alarm, 48 Different Road"
+        with patch.object(main.transcribe, "GROQ_ENABLED", True), patch.object(
+                main.ARCHIVE_DIR.__class__, "is_file", return_value=True), patch.object(
+                main, "verify_and_send", new_callable=AsyncMock, return_value="suppressed") as verify, patch.object(
+                main.transcribe, "second_listen", return_value=fake):
+            result, same = await main.verify_zello_with_second_listen(
+                "zello-sullivan", hit, Mock(), "a.wav", fresh_ts=100)
+        self.assertEqual(result, "suppressed")
+        self.assertIs(same, hit)
+        verify.assert_awaited_once()
+
+
+class TestThirdAlarmAndIntersection(unittest.TestCase):
+    def test_queens_third_alarm_despite_brooklyn_chatter(self):
+        import detect
+        t = ("Brooklyn Housing, Queens, a third alarm transmitted Box 4374, "
+             "159-22 Hillside Avenue, Parsons Boulevard to 160th Street. "
+             "Fire is in a two-story mixed occupancy.")
+        h = detect.analyze(t, "fdny")
+        self.assertEqual(h["address"], "159-22 Hillside Avenue, Queens, NY")
+        self.assertEqual(h["nature"], "Third Alarm")
+
+    def test_spoken_intersection_is_not_a_house_number(self):
+        import detect
+        h = detect.analyze("6th Avenue at 65th Street, motor vehicle accident", "fdny")
+        self.assertEqual(h["address"], "6th Ave & 65th St, Brooklyn, NY")
+        self.assertEqual(h["nature"], "Motor Vehicle Accident")
+        self.assertEqual(unnumbered_with_spoken_building(h["excerpt"], h["address"]), "")
+
+
+class TestIntersectionPosting(unittest.IsolatedAsyncioTestCase):
+    async def test_mva_intersection_uses_two_road_map_gate(self):
+        import main, detect
+        from unittest.mock import AsyncMock, Mock, patch
+        hit = detect.analyze("6th Avenue at 65th Street, motor vehicle accident", "fdny")
+        sent = []
+        with patch.object(main, "_intersection_point", new_callable=AsyncMock,
+                          return_value=(40.6352161, -74.0170054)) as crossing, patch.object(
+                main.alert_waha, "send_text", new_callable=AsyncMock,
+                side_effect=lambda text: sent.append(text) or True), patch.object(
+                main, "_load_recent", return_value=[]), patch.object(
+                main, "_save_recent"), patch.object(main, "ops_log"), patch.object(
+                main, "_map_street_names", new_callable=AsyncMock, return_value=set()):
+            outcome = await main.verify_and_send("fdny", hit, Mock(), None)
+        self.assertEqual(outcome, "sent")
+        self.assertEqual(len(sent), 1)
+        self.assertIn("6th Ave & 65th St", sent[0])
+        crossing.assert_awaited()
+
+    async def test_mva_unverified_intersection_stays_held(self):
+        import main, detect
+        from unittest.mock import AsyncMock, Mock, patch
+        hit = detect.analyze("6th Avenue at 65th Street, motor vehicle accident", "fdny")
+        with patch.object(main, "_intersection_point", new_callable=AsyncMock,
+                          return_value=(None, None)), patch.object(
+                main, "geocode_verify", new_callable=AsyncMock,
+                return_value=(False, False, "", None, None, "")), patch.object(
+                main, "_correct_street_via_crosses", new_callable=AsyncMock,
+                return_value=""), patch.object(
+                main.alert_waha, "send_text", new_callable=AsyncMock) as sender, patch.object(
+                main, "_load_recent", return_value=[]), patch.object(
+                main, "_save_recent"), patch.object(main, "ops_log"):
+            outcome = await main.verify_and_send("fdny", hit, Mock(), None)
+        self.assertEqual(outcome, "suppressed")
+        sender.assert_not_awaited()
+
+
+class TestRepeatedFdnyHouse(unittest.TestCase):
+    def test_class_three_then_1500_east_92(self):
+        import detect
+        t = ("East 92 Street, Avenue M to Avenue L, automatic alarm, PS 115. "
+             "Unassigned Class 3, 2287, 1500 East 92 Street, Avenue M/Mary "
+             "to Avenue L/Lincoln, automatic alarm, PS 115.")
+        h = detect.analyze(t, "fdny")
+        self.assertEqual(h["address"], "1500 East 92 Street, Brooklyn, NY")
+        self.assertEqual(h["nature"], "Automatic Alarm")
+        self.assertTrue(exact_numbered_fdny_match(h["address"],
+                        "1500 EAST 92 STREET, Brooklyn, NY, USA"))

@@ -142,6 +142,8 @@ SULLIVAN_AREAS = {
     "woodbourne": "Woodbourne",
     "monticello": "Monticello",
     "liberty": "Liberty",
+    "lock sheltering": "Loch Sheldrake",  # observed Groq ASR variant
+    "lock sheldrake": "Loch Sheldrake",
     "lock sheldrick": "Loch Sheldrake",  # whisper variant, verified 9/28
     "loch sheldrake": "Loch Sheldrake",
     "ganser": "Loch Sheldrake",  # Ganser Road is in Loch Sheldrake
@@ -710,7 +712,8 @@ def _with_area(addr: str, profile: str, text: str) -> str:
         state = "NJ" if locality in BERGEN_AREAS.values() else "NY"
         area = f"{locality}, {state}"
     elif profile == "fdny":
-        area = "Brooklyn, NY"
+        from fdny_borough_gate import spoken_job_borough
+        area = f"{spoken_job_borough(text) or 'Brooklyn'}, NY"
     else:
         area = f"{get_sullivan_area(text)}, NY"
     # The locality word inside a street name is not the locality: "Fair
@@ -735,6 +738,14 @@ _LONE_STREET_RE = re.compile(
 def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None:
     """Best-effort dispatch location for one transcript chunk."""
     if profile == "fdny":
+        # Queens hyphenated house numbers are indivisible, never the suffix
+        # alone (159-22 is a building number, not a radio run plus 22).
+        queens_house = re.search(
+            r"\b(\d{2,3}-\d{1,3})\s+([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\s+"
+            r"(Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Drive|Dr|Place|Pl)\b",
+            _norm(text), re.I)
+        if queens_house:
+            return _with_area(f"{queens_house.group(1)} {_addr_title(queens_house.group(2) + ' ' + queens_house.group(3))}", profile, text)
         # A numbered NYCHA Walk is a full street address, including an
         # internal number ("127 Kingsborough 1 Walk"). Match it before an
         # unrelated street or a radio unit's apparent house-number fragment.
@@ -781,6 +792,17 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         if class_house:
             return _with_area(f"{class_house.group(1)} {_addr_title(class_house.group(2))}",
                               profile, text)
+        # A repeated, complete house address outranks an earlier bare road.
+        # In the PS 115 readout "East 92 Street ... Class 3 2287, 1500 East 92
+        # Street", the 2287 is the class/box ID; 1500 is the house.
+        repeated_house = re.search(
+            r"\b(?:class\s*3\s*[,;]?\s*\d{2,4}\s*[,;]?\s*|"
+            r"box\s+\d{2,4}\s*[,;]?\s*)"
+            r"(\d{1,5})\s+((?:East|West|North|South)\s+\d{1,3}"
+            r"(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", text, re.I)
+        if repeated_house:
+            return _with_area(f"{repeated_house.group(1)} "
+                              f"{_addr_title(repeated_house.group(2))}", profile, text)
         # The Brooklyn letter avenue is "Avenue U", not an unnumbered
         # "1111 Avenue" or an intersection inferred from later cross roads.
         # Require a distinct house before the typed letter avenue; never
@@ -957,7 +979,7 @@ def get_nature(text: str, profile: str = "") -> str:
             return _addr_title(m.group(0))
         return ""
 
-    v = vt(r"\b(?:all hands|10-75|10 75|working fire|second alarm)\b")
+    v = vt(r"\b(?:all hands|10-75|10 75|working fire|second alarm|third alarm)\b")
     if v: return v
     # Train/subway strike is a life-safety nature, not generic "ped struck".
     # Preserve the exact dispatcher wording and keep it ahead of apparatus
@@ -1092,6 +1114,10 @@ def get_nature(text: str, profile: str = "") -> str:
         mp = re.search(r"\b(ruptured|struck|hit|broken|leaking|leak)\b",
                        t[m_gas.end(): m_gas.end() + 40])
         return _addr_title("gas main " + mp.group(1)) if mp else "Gas Main"
+    # Keep "Smoke in the area" distinct from smoke inside a building.
+    # Only this spoken phrase, not a bare "smoke", earns the separate nature.
+    v = vt(r"\b(?:odou?r\s+of\s+)?smoke\s+in\s+the\s+area\b")
+    if v: return "Smoke in the area"
     # Alarm activation is not evidence of an actual fire. Preserve the
     # spoken alarm nature, unless a specific fire complaint above won first.
     v = vt(r"\b(?:activated\s+(?:fire\s+)?alarm|fire\s+alarm\s+activation)\b")

@@ -1,4 +1,4 @@
-"""Transcription: AssemblyAI cloud primary, local faster-whisper fallback.
+"""Transcription: optional Groq large-v3 for Zello, AssemblyAI/local fallback.
 
 AssemblyAI (universal-3-pro, keyterm-boosted with dispatch geography) massively
 outperforms local whisper on scratchy radio audio. Free credit, no card; only
@@ -21,6 +21,9 @@ from pathlib import Path
 _model = None
 RMS_MIN = int(os.environ.get("RMS_MIN", "350"))
 AAI_KEY = os.environ.get("ASSEMBLYAI_API_KEY", "").strip()
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_ENABLED = os.environ.get("GROQ_ENABLED", "0") == "1"
+GROQ_TIMEOUT = float(os.environ.get("GROQ_TIMEOUT", "20"))
 AAI_TIMEOUT = float(os.environ.get("ASSEMBLYAI_TIMEOUT", "60"))
 
 # Dispatch geography for keyword boosting - the user's calibration loop lives here.
@@ -93,6 +96,28 @@ def _aai_transcribe(wav_path: str, keyterms: list[str], models: list[str]) -> st
     raise TimeoutError("assemblyai poll timeout")
 
 
+def _groq_transcribe(wav_path: str) -> str:
+    """Send one speech segment as multipart audio; never log the credential."""
+    import json
+    import urllib.request
+    import uuid
+    boundary = "fdny-" + uuid.uuid4().hex
+    with open(wav_path, "rb") as f:
+        audio = f.read()
+    if len(audio) > 25_000_000:
+        raise ValueError("audio exceeds Groq free-tier file limit")
+    payload = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n"
+               f"whisper-large-v3\r\n--{boundary}\r\n"
+               f"Content-Disposition: form-data; name=\"file\"; filename=\"dispatch.wav\"\r\n"
+               f"Content-Type: audio/wav\r\n\r\n").encode() + audio + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/audio/transcriptions", data=payload,
+        headers={"Authorization": "Bearer " + GROQ_KEY,
+                 "Content-Type": "multipart/form-data; boundary=" + boundary})
+    with urllib.request.urlopen(req, timeout=GROQ_TIMEOUT) as resp:
+        return (json.load(resp).get("text") or "").strip()
+
+
 def _local_transcribe(wav_path: str) -> str:
     try:
         model = get_model()
@@ -106,6 +131,21 @@ def _local_transcribe(wav_path: str) -> str:
         return " ".join(s.text.strip() for s in segments).strip()
     except Exception as e:  # noqa: BLE001
         logging.warning("local transcription failed: %s", e)
+        return ""
+
+
+def second_listen(wav_path: Path | str, profile: str) -> str:
+    """One Groq pass on a held Zello incident, off by default.
+
+    The caller owns safe trigger selection, job-local match and re-verification.
+    """
+    if not (GROQ_ENABLED and GROQ_KEY and
+            profile in ("zello-sullivan", "zello-hatzalah", "zello-hatzolah")):
+        return ""
+    try:
+        return _groq_transcribe(str(wav_path))
+    except Exception as e:  # noqa: BLE001
+        logging.warning("[%s] second listen unavailable (%s)", profile, type(e).__name__)
         return ""
 
 

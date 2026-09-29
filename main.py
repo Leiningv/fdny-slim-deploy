@@ -248,7 +248,8 @@ async def _planning_labs(addr: str, allowed_boroughs: list[str]) -> tuple:
     when the top hit is in an allowed borough, else (None, None, None).
     Network error -> ('', None, None)."""
     try:
-        q = addr.replace(" ", "%20")
+        from urllib.parse import quote
+        q = quote(addr, safe="")
         url = f"https://geosearch.planninglabs.nyc/v2/search?text={q}&size=1"
         async with aiohttp.ClientSession() as s:
             async with s.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
@@ -300,12 +301,11 @@ def _side_verifies(side: str, target: str) -> bool:
 
 async def geocode_verify(addr: str, profile: str = "") -> tuple:
     """Returns (verified, in_sullivan_county, verified_label, lat, lon, locality).
-    NYC profiles: Planning Labs with the old system's borough filters (FDNY
-    Brooklyn-only; Hatzalah Brooklyn/Queens/Manhattan/Bronx), Nominatim fallback.
-    Sullivan: Nominatim + county check."""
+    NYC profiles: Planning Labs, with FDNY restricted to the spoken borough.
+    Sullivan: Nominatim plus county check."""
     p = profile.lower()
     if "fdny" in p or "hatzalah" in p or "hatzolah" in p:
-        boroughs = ["Brooklyn"] if "fdny" in p else ["Brooklyn", "Queens", "Manhattan", "Bronx", "Staten Island"]
+        boroughs = ["Brooklyn", "Queens", "Manhattan", "Bronx", "Staten Island"]
         requested_area = addr.split(",")[1].strip().lower() if "," in addr else ""
         if addr.upper().endswith(", NJ") or (requested_area and requested_area not in
                 ("brooklyn", "queens", "manhattan", "bronx", "staten island", "riverdale", "new york")):
@@ -313,7 +313,10 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
         for q in _geocode_variants(addr, profile):
             if not boroughs:
                 break  # NJ uses county-aware Nominatim; NYC search is invalid.
-            label, lat, lon = await _planning_labs(q, boroughs)
+            allowed = ([requested_area.title()] if "fdny" in p and requested_area in
+                       ("brooklyn", "queens", "manhattan", "bronx", "staten island")
+                       else boroughs)
+            label, lat, lon = await _planning_labs(q, allowed)
             if label == "":
                 break  # network failure -> Nominatim fallback
             if label:
@@ -341,6 +344,11 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                     # (the shul name) was ignored (bad post 9/28 12:46 PM)
                     logging.info("geocode: rejected partial-token fallback: %s -> %s", q, label)
                     continue
+                # Planning Labs labels use neighborhoods (Jamaica, NY) rather
+                # than boroughs (Queens); the feature borough property is
+                # checked by _planning_labs, and exact numbered house/road is
+                # verified again by the caller. Do not reject Jamaica as not
+                # Queens just because its label names the neighborhood.
                 found_borough = label.split(",")[1].strip() if "," in label else ""
                 requested_area = addr.split(",")[1].strip() if "," in addr else ""
                 if "hatzal" in p or "hatzol" in p:
@@ -355,7 +363,7 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                         continue
                     if requested_area.lower() in ("rockland", "monsey"):
                         continue
-                return True, False, label, lat, lon, found_borough
+                return True, False, label, lat, lon, (requested_area.title() if "fdny" in p and requested_area else found_borough)
         if "fdny" in p:
             return False, False, "", None, None, ""
         # hatzalah: fall through to Nominatim for non-NYC (5 Towns, Rockland...)
@@ -465,9 +473,15 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                 locality = {"Kings County": "Brooklyn", "Queens County": "Queens",
                             "New York County": "Manhattan", "Bronx County": "Bronx",
                             "Richmond County": "Staten Island"}.get(county_name, locality)
-            if "fdny" in p and ("Kings" not in county_name and
-                                 "Brooklyn" not in str(ad.get("borough", ""))):
-                continue
+            if "fdny" in p:
+                requested_boro = addr.split(",")[1].strip().lower() if "," in addr else ""
+                county_expected = {"brooklyn": "Kings", "queens": "Queens",
+                                   "manhattan": "New York", "bronx": "Bronx",
+                                   "staten island": "Richmond"}.get(requested_boro)
+                if not county_expected or (county_expected not in county_name and
+                    requested_boro not in str(ad.get("borough", "")).lower()):
+                    continue
+                locality = requested_boro.title()
             if "sullivan" in p and "Sullivan" not in county_name:
                 continue
             # Explicit dispatch locality wins over a fuzzy same-road hit in
@@ -1182,10 +1196,14 @@ _REVIEW_SKIP = {"feed muted", "dup incident", "bare box", "Rockland dispatch",
 
 def _held_review_text(profile: str, hit: dict) -> str:
     """Explain only the actual parsed data and uncertainty, never invent a read."""
-    source = {"fdny": "FDNY Brooklyn", "sullivan": "Sullivan",
+    source = {"fdny": "FDNY", "sullivan": "Sullivan",
               "hatzolah": "Hatzalah", "hatzalah": "Hatzalah"}.get(
                   profile.removeprefix("zello-"), profile)
     address = (hit.get("address") or "").strip()
+    if profile.removeprefix("zello-") == "sullivan":
+        # A held job has no confirmed locality. Strip both the generic county
+        # suffix and any ASR-guessed town; keep only the road actually heard.
+        address = address.split(",", 1)[0].strip()
     nature = (hit.get("nature") or "").strip()
     reason = (hit.get("hold_reason") or "").strip()
     heard = (f"The system parsed {nature} at {address}." if nature and address else
@@ -1678,9 +1696,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 house = re.match(r"^\s*(\d+)\s+", hit["address"])
                 if not house:
                     continue
-                candidate = f"{house.group(1)} {type_long.title()}, Brooklyn, NY"
+                candidate = f"{house.group(1)} {type_long.title()}, {locality}, NY"
                 v2, ins2, lbl2, la2, lo2, loc2 = await geocode_verify(candidate, profile)
-                if v2 and loc2.lower() == "brooklyn":
+                if v2 and loc2.lower() == locality.lower():
                     stats.event(profile, f"address corrected via box/map: {hit['address']} -> {candidate}")
                     ops_log(f"address corrected via box/map: {hit['address']} -> {candidate}")
                     hit["address"] = candidate
@@ -1794,7 +1812,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                         f"lookup: " + "; ".join(f"{l} ({b})" for l, b in rows))
             from fdny_borough_gate import box_street_conflict
             if (verified and not box_disp and
-                    box_street_conflict(hit["address"], locality, rows)):
+                    box_street_conflict(hit["address"], locality, rows) and
+                    not (re.match(r"^\d{1,5}(?:-\d{1,3})?\s+", hit["address"]) and
+                         exact_numbered_fdny_match(hit["address"], verified_label))):
                 reason = "spoken FDNY box conflicts with the verified street"
                 stats.event(profile, f"Held: {reason}: Box {heard} @ {hit['address']}")
                 ops_log(f"Held: {reason}: Box {heard} @ {hit['address']}")
@@ -1967,7 +1987,7 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     nature = (hit.get("nature") or "").strip().upper()
     is_sullivan = (hit.get("source") or "").removeprefix("zello-") == "sullivan"
     street = hit["address"]
-    if is_sullivan and hit.get("verified_area"):
+    if is_sullivan:
         street = re.sub(r",\s*[^,]+,\s*NY$", "", street, flags=re.I)
     addr_line = f"\N{ROUND PUSHPIN} *{street}*"
     if is_sullivan and footer:
@@ -2016,6 +2036,13 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         time_line = f"CAD - TIME {spoken_time}"
     lines += ["", time_line]
     label = footer or SOURCE_LABEL.get(hit["source"], hit["source"])
+    if hit.get("source") == "fdny":
+        dispatch_area = re.search(r",\s*(Brooklyn|Queens|Manhattan|Bronx|Staten Island),\s*NY$",
+                                  hit.get("address") or "", re.I)
+        if dispatch_area:
+            borough = dispatch_area.group(1).title()
+            label = ("FDNY Brooklyn feed - " + borough + " borough announcement"
+                     if borough != "Brooklyn" else "FDNY Brooklyn Dispatch")
     if (hit.get("source") or "").removeprefix("zello-") == "sullivan":
         # The same pager carries fire and EMS jobs. Empress/EMS/ALS/BLS
         # dispatches are EMS; otherwise use the spoken nature, without
@@ -2074,6 +2101,58 @@ def _ptt_ready(profile: str) -> list[Path]:
     return sorted((p for p in SEG_DIR.glob(f"{profile}-ptt-*.wav")
                    if p.with_suffix(".json").exists() and p.stat().st_size > 44),
                   key=lambda p: p.stat().st_mtime)
+
+
+async def verify_zello_with_second_listen(profile: str, hit: dict, stats,
+                                          clip_name: str, *, fresh_ts: float) -> tuple[str, dict]:
+    """Primary ASR first; one optional second listen before finalizing a hold.
+
+    A different job/address never becomes an automatic post. Every revised
+    candidate goes through the entire normal verification and freshness gate.
+    """
+    outcome = await verify_and_send(profile, hit, stats, clip_name, fresh_ts=fresh_ts,
+                                    audio_ts=fresh_ts)
+    if outcome != "suppressed" or not transcribe.GROQ_ENABLED:
+        return outcome, hit
+    reason = hit.get("hold_reason") or ""
+    if reason not in ("no nature", "no verified location", "ambiguous default borough",
+                      "spoken crossing roads not verified") and not reason.startswith(
+                          ("spoken cross unverified:",)):
+        return outcome, hit
+    # If the first ASR heard a complaint, the second ear may clarify its
+    # location, never overturn that complaint into another incident. An
+    # original 'no nature' may recover only when the road and house agree.
+    src = ARCHIVE_DIR / clip_name
+    if not src.is_file():
+        return outcome, hit
+    second = await asyncio.to_thread(transcribe.second_listen, src, profile)
+    if not second:
+        return outcome, hit
+    candidates = [detect.analyze(span, profile) for span in
+                  detect.split_dispatch_jobs(second, profile)]
+    candidates = [c for c in candidates if c and c.get("nature") and c.get("address")]
+    if len(candidates) != 1:
+        return outcome, hit
+    candidate = candidates[0]
+    # Two ASR readings can disagree about a street or another incident.
+    # Only rescue this same road with an equal or newly recovered house.
+    old_road = _street_core(hit.get("address") or "")
+    new_road = _street_core(candidate["address"])
+    old_house = re.match(r"^\s*(\d{1,5}(?:-\d{1,3})?)\s+", hit.get("address") or "")
+    new_house = re.match(r"^\s*(\d{1,5}(?:-\d{1,3})?)\s+", candidate["address"])
+    if (not old_road or old_road != new_road or
+            (old_house and (not new_house or old_house.group(1) != new_house.group(1))) or
+            (hit.get("nature") and candidate["nature"].lower() != hit["nature"].lower())):
+        stats.event(profile, "second listen disagreed on incident location or complaint; held for review")
+        return outcome, hit
+    # A second ASR is diagnostic, not permission to silently replace a
+    # different claimed town; the map must still verify its exact job area.
+    revised = await verify_and_send(profile, candidate, stats, clip_name,
+                                    fresh_ts=fresh_ts, audio_ts=fresh_ts)
+    if revised == "sent":
+        stats.event(profile, "held job recovered by second listen and map verification")
+        return revised, candidate
+    return outcome, hit
 
 
 async def ptt_consumer(profile: str, stats: Stats, seen: dict) -> None:
@@ -2162,8 +2241,8 @@ async def ptt_consumer(profile: str, stats: Stats, seen: dict) -> None:
                     now=time.time()
                     if now-seen.get(key,0)<DEDUP_SEC:continue
                     seen[key]=now;_save_seen(seen)
-                    outcome=await verify_and_send(profile,hit,stats,clip_name,
-                                                   fresh_ts=rec["start"],audio_ts=rec["start"])
+                    outcome,hit=await verify_zello_with_second_listen(
+                        profile,hit,stats,clip_name,fresh_ts=rec["start"])
                     ok=outcome=="sent"
                     if outcome=="suppressed":
                         hit["voice_url"]=await _held_recording(clip_name)
@@ -2232,7 +2311,7 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
             if prev is not None and _concat_pcm(prev, wav, pair_out):
                 target = pair_out
             prev = wav
-            text = await asyncio.to_thread(transcribe.transcribe, target)
+            text = await asyncio.to_thread(transcribe.transcribe, target, profile)
             if not text:
                 continue
             stats.mark_transcript(profile, text)
@@ -2260,8 +2339,8 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
                     continue
                 seen[key] = now
                 _save_seen(seen)
-                outcome = await verify_and_send(profile, hit, stats, clip_name,
-                                                fresh_ts=wav.stat().st_mtime)
+                outcome, hit = await verify_zello_with_second_listen(
+                    profile, hit, stats, clip_name, fresh_ts=wav.stat().st_mtime)
                 ok = outcome == "sent"
                 if outcome == "suppressed":
                     hit["voice_url"] = await _held_recording(clip_name)
@@ -2585,7 +2664,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
     if not hold_reason and re.search(r"\b(?:basement|cellar|dwelling)\b", nature, re.I):
         hold_reason = "FDNY dwelling detail needs independent audio check"
     elif not hold_reason and re.fullmatch(r"\d{1,5}\s+[A-Za-z][A-Za-z' -]+?\s+"
-                      r"(?:Street|Avenue|Road|Place|Drive|Court), Brooklyn, NY", address, re.I):
+                      r"(?:Street|Avenue|Road|Place|Drive|Court), (?:Brooklyn|Queens|Manhattan|Bronx|Staten Island), NY", address, re.I):
         try:
             verified_street = bool((await geocode_verify(address, "fdny"))[0])
         except Exception:
