@@ -1044,7 +1044,9 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\baided\b")
     if v: return v
-    v = vt(r"\bodou?r of gas\b")
+    # A dispatcher can say either "odor of gas" or "gas odor". Both are
+    # explicit complaints and outrank the transmission type (Phone Alarm).
+    v = vt(r"\b(?:odou?r of gas|gas odou?r)\b")
     if v: return v
     # Confirmed FDNY ASR variants for an audible "odor of gas" complaint.
     # Only the complete two/three-word phrase qualifies, not generic "gas".
