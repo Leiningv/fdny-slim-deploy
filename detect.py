@@ -752,6 +752,13 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
             if walk_name.lower() == "kingsboro":
                 walk_name = "Kingsborough"
             return _with_area(f"{m.group(1)} {walk_name} {n}{suffix} Walk", profile, text)
+        # FDNY sometimes gives a numbered MetroTech building as the address,
+        # followed by Myrtle/Bridge as cross roads. MetroTech is a mapped
+        # street/building name, not a generic "tech" descriptor. Preserve the
+        # spoken number and let the sender verify the exact rooftop location.
+        metro = re.search(r"\b(?:address\s+)?(\d{1,3})\s+(Metro\s*Tech)(?:\s+Center)?\b", _norm(text), re.I)
+        if metro:
+            return _with_area(f"{metro.group(1)} MetroTech Center", profile, text)
         # ASR may omit the ordinal suffix inside a numbered South street:
         # "330 South 3 Street". A distinct house number before the road is
         # stronger than a later bare "Box 231, 330 South 3" readout. Keep
@@ -1480,7 +1487,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                 street_part, re.I):
         logging.info("suppressed (type-only address): %s", addr)
         return None
-    if not box_only and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
+    metrotech_house = bool(profile == "fdny" and re.fullmatch(r"\d{1,3} MetroTech Center", street_part, re.I))
+    if not box_only and not metrotech_house and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
             and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
         logging.info("suppressed (no street type): %s", addr)
         return None
