@@ -37,6 +37,19 @@ class SpokenDispatchRegression(unittest.TestCase):
         self.assertEqual(spoken_job_borough(t), "")
         self.assertNotEqual(detect.get_nature(t, "fdny"), "Smoke")
 
+    def test_440_atlantic_spoken_odor_of_smoke_beats_phone_alarm(self):
+        t = ("Phone alarm box 586, 440 Atlantic Avenue, Nevins Street to Bond "
+             "Street, odor of smoke, first floor. "
+             "Phone alarm box 586, 440 Atlantic Avenue, Nevins Street to Bond "
+             "Street, odor of smoke, first floor.")
+        h = detect.analyze(t, "fdny")
+        self.assertEqual(h["nature"], "Odor of Smoke")
+        self.assertEqual(h["address"], "440 Atlantic Avenue, Brooklyn, NY")
+        self.assertNotEqual(detect.get_nature(t.replace("odor of smoke", "no odor of smoke"),
+                                               "fdny"), "Odor of Smoke")
+        self.assertNotEqual(detect.get_nature(t + " Brooklyn Box 1703, automatic alarm",
+                                               "fdny"), "Odor of Smoke")
+
     def test_existing_bare_and_typed_cross_rules(self):
         t = "Box 653, 362 Lafayette Avenue, Classon and Grand Avenue, smoke on the number one floor"
         h = detect.analyze(t, "fdny")
