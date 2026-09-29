@@ -1146,6 +1146,19 @@ def _save_recent(rows: list) -> None:
         pass
 
 
+async def _held_recording(clip_name: str | None) -> str:
+    """Off-site audio for new held jobs; a failure never affects posting gates."""
+    if not clip_name:
+        return ""
+    try:
+        ogg = await asyncio.to_thread(_ensure_ogg, clip_name)
+        if ogg:
+            return await _uguu_upload(ARCHIVE_DIR / ogg)
+    except Exception as e:
+        logging.warning("held recording upload unavailable: %s", e)
+    return ""
+
+
 async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None,
                             fresh_ts: float | None = None,
                             audio_ts: float | None = None, spoken_time: str = "",
@@ -1159,6 +1172,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         logging.info("[%s] suppressed (feed muted): %s @ %s", profile, hit["nature"], hit["address"])
         stats.event(profile, f"suppressed (feed muted): {hit['nature']} @ {hit['address']}")
         ops_log(f"suppressed (feed muted): {hit['nature']} @ {hit['address']}")
+        hit["hold_reason"] = "feed muted"
         return "suppressed"
     if fresh_ts:
         fresh_limit = FRESH_FDNY_SEC if profile == "fdny" else FRESH_LIVE_SEC
@@ -1168,6 +1182,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                          profile, age / 60, fresh_limit / 60, hit["nature"], hit["address"])
             stats.event(profile, f"suppressed (stale, {age / 60:.0f}m old): {hit['nature']} @ {hit['address']}")
             ops_log(f"suppressed (stale, {age / 60:.0f}m old): {hit['nature']} @ {hit['address']}")
+            hit["hold_reason"] = f"stale audio ({age / 60:.0f} min)"
             return "suppressed"
     nat_norm = (hit.get("nature") or "").strip().lower()
     toks = _rare_tokens(hit["address"])
@@ -1178,22 +1193,26 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                              profile, hit["nature"], hit["address"])
                 stats.event(profile, f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
                 ops_log(f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
+                hit["hold_reason"] = "dup incident"
                 return "suppressed"
     if re.match(r"^FDNY Box \d+", hit["address"]) and not hit.get("box_only"):
         logging.info("[%s] suppressed (bare box, no street address): %s", profile, hit["address"])
         stats.event(profile, f"suppressed (bare box): {hit['address']}")
         ops_log(f"suppressed (bare box): {hit['address']}")
+        hit["hold_reason"] = "bare box"
         return "suppressed"
     if not (hit.get("nature") or "").strip():
         logging.info("[%s] suppressed (no discernible nature): %s", profile, hit["address"])
         stats.event(profile, f"suppressed (no nature): {hit['address']}")
         ops_log(f"suppressed (no nature): {hit['address']}")
+        hit["hold_reason"] = "no nature"
         return "suppressed"
     if profile.lower().startswith(("hatzalah", "zello-hatzalah")) and \
             (hit.get("nature") or "").strip().lower() in control.excluded_natures():
         logging.info("[%s] suppressed (Hatzalah %s excluded): %s", profile, hit.get("nature"), hit["address"])
         stats.event(profile, f"suppressed ({hit.get('nature')} excluded): {hit['address']}")
         ops_log(f"suppressed ({hit.get('nature')} excluded): {hit['address']}")
+        hit["hold_reason"] = f"{hit.get('nature')} excluded by controls"
         return "suppressed"
     box_task = None
     if profile == "fdny":
@@ -1216,6 +1235,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             r"haverstraw|garnerville|airmont|chestnut ridge)\b",
             hit.get("excerpt") or "", re.I):
         stats.event(profile, f"suppressed (Rockland dispatch): {hit['address']}")
+        hit["hold_reason"] = "Rockland dispatch"
         return "suppressed"
     if profile.lower().removeprefix("zello-") in ("hatzolah", "hatzalah") and hit.get("area_defaulted"):
         import locality_gate
@@ -1249,6 +1269,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if not pair_safe and not await locality_gate.default_area_safe(hit, hit.get("excerpt") or ""):
             stats.event(profile, f"suppressed (ambiguous default borough): {hit['address']}")
             ops_log(f"suppressed (ambiguous default borough): {hit['address']}")
+            hit["hold_reason"] = "ambiguous default borough"
             return "suppressed"
     if profile == "fdny" and re.search(r"\b\d+(?:st|nd|rd|th)\s+Walk,", hit["address"], re.I):
         # A reused overlapping clip may contain a separate numbered street
@@ -1262,6 +1283,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if walk_house and any(num != walk_house.group(1) for num in others) and hit.get("box_heard"):
             stats.event(profile, f"suppressed (mixed Walk/other address): {hit['address']}")
             ops_log(f"suppressed (mixed Walk/other address): {hit['address']}")
+            hit["hold_reason"] = "mixed Walk/other address"
             return "suppressed"
     if profile == "fdny" and hit.get("terminal_street_box_correlated"):
         # A user's specific reading of this garbled dispatch is still gated
@@ -1272,6 +1294,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                         and "9 AVE" in loc.upper() for loc, boro in rows)
         if not exact_row:
             stats.event(profile, "suppressed (terminal street box mismatch)")
+            hit["hold_reason"] = "terminal street box mismatch"
             return "suppressed"
     if profile == "fdny" and hit.get("box_only"):
         # A terminal-ID dispatch with no trustworthy spoken street may use
@@ -1282,11 +1305,13 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         brooklyn_rows = [place for place, boro in box_rows if boro == "Brooklyn"]
         if len(brooklyn_rows) != 1:
             stats.event(profile, f"suppressed (box-only location unverified): {heard_box}")
+            hit["hold_reason"] = "box-only location unverified"
             return "suppressed"
         box_place = brooklyn_rows[0]
         sides = [p.strip() for p in re.split(r"\s+at\s+|&", box_place, flags=re.I)]
         if len(sides) != 2 or not all(sides):
             stats.event(profile, f"suppressed (box-only location incomplete): {heard_box}")
+            hit["hold_reason"] = "box-only location incomplete"
             return "suppressed"
         # The spoken 8th/9th corridor must corroborate at least one side of
         # the box location. Generic area words don't count as a match.
@@ -1295,6 +1320,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if not said or not any(re.search(r"\b" + re.escape(x) + r"\b", listed, re.I)
                                for x in re.findall(r"\b\d{1,2}\b", said)):
             stats.event(profile, f"suppressed (box-only crosses uncorroborated): {heard_box}")
+            hit["hold_reason"] = "box-only crosses uncorroborated"
             return "suppressed"
         def box_side_name(raw):
             p = raw.strip().lower()
@@ -1310,6 +1336,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         lat, lon = await _intersection_point(candidate, box_side_name(sides[1]))
         if lat is None:
             stats.event(profile, f"suppressed (box-only intersection unverified): {heard_box}")
+            hit["hold_reason"] = "box-only intersection unverified"
             return "suppressed"
         hit["address"] = candidate
         hit["cross"] = ""
@@ -1363,11 +1390,13 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                          r"haverstraw|garnerville|airmont|chestnut ridge)\b",
                          hit.get("excerpt") or "", re.I):
                 stats.event(profile, f"suppressed (Rockland dispatch): {hit['address']}")
+                hit["hold_reason"] = "Rockland dispatch"
                 return "suppressed"
         if profile == "sullivan" and verified and not in_sullivan:
             logging.info("[%s] suppressed (verified outside Sullivan Co): %s", profile, hit["address"])
             stats.event(profile, f"suppressed (outside Sullivan Co): {hit['nature']} @ {hit['address']}")
             ops_log(f"suppressed (outside Sullivan Co): {hit['nature']} @ {hit['address']}")
+            hit["hold_reason"] = "outside Sullivan Co"
             return "suppressed"
         if not verified:
             stats.event(profile, f"unconfirmed address: {hit['address']}")
@@ -1661,6 +1690,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if len(choices) != 1:
             stats.event(profile, f"suppressed (ambiguous five-digit box/house): {raw_run}")
             ops_log(f"suppressed (ambiguous five-digit box/house): {raw_run}")
+            hit["hold_reason"] = "ambiguous five-digit box/house"
             return "suppressed"
         box_disp, hit["address"], verified_label, lat, lon, locality = choices[0]
         box_mismatch = False
@@ -1674,6 +1704,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     if profile == "fdny" and hit.get("box_glue_ambiguous") and (not verified or not box_disp or box_mismatch):
         stats.event(profile, f"suppressed (ambiguous box/house split): {hit['address']}")
         ops_log(f"suppressed (ambiguous box/house split): {hit['address']}")
+        hit["hold_reason"] = "ambiguous box/house split"
         return "suppressed"
     # user rules 9/28 13:12 ("the deal"): ADDRESS MANDATORY on every post -
     # unconfirmed with no box anchor does not go out ("no such a thing a
@@ -1686,6 +1717,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         logging.info("[%s] suppressed (%s): %s", profile, reason, hit["address"])
         stats.event(profile, f"suppressed ({reason}): {hit['nature']} @ {hit['address']}")
         ops_log(f"suppressed ({reason}): {hit['nature']} @ {hit['address']}")
+        hit["hold_reason"] = reason
         return "suppressed"
     box_closest = False
     if profile == "fdny" and not box_disp:
@@ -1719,6 +1751,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                          profile, hit["nature"], hit["address"])
             stats.event(profile, f"suppressed (no box obtainable): {hit['nature']} @ {hit['address']}")
             ops_log(f"suppressed (no box obtainable): {hit['nature']} @ {hit['address']}")
+            hit["hold_reason"] = "no box obtainable"
             return "suppressed"
     # North Shore Towers is a documented complex reached from the Grand
     # Central Parkway service road. Keep the broad highway geocode as the
@@ -1940,9 +1973,12 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
                 outcome = await verify_and_send(profile, hit, stats, clip_name,
                                                 fresh_ts=wav.stat().st_mtime)
                 ok = outcome == "sent"
+                if outcome == "suppressed":
+                    hit["voice_url"] = await _held_recording(clip_name)
                 stats.mark_alert(profile, hit["nature"], hit["address"], ok,
                                  voice_url=hit.get("voice_url", ""),
-                                 failed=(outcome == "queued"), outcome=outcome)
+                                 failed=(outcome == "queued"), outcome=outcome,
+                                 reason=hit.get("hold_reason", ""))
                 _append_alert_log({"t": now, "feed": profile, "nature": hit["nature"],
                                    "address": hit["address"], "sent": ok,
                                    "excerpt": hit["excerpt"]})
@@ -2059,9 +2095,11 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                  cid, time.monotonic()-verify_start, time.monotonic()-stage_start, outcome)
 
     ok = outcome == "sent"
+    if outcome == "suppressed":
+        hit["voice_url"] = await _held_recording(clip_name)
     stats.mark_alert("fdny", hit["nature"], hit["address"], ok,
                      failed=(outcome == "queued"), outcome=outcome,
-                     voice_url=hit.get("voice_url", ""))
+                     voice_url=hit.get("voice_url", ""), reason=hit.get("hold_reason", ""))
     _append_alert_log({"t": now, "feed": "fdny", "nature": hit["nature"],
                        "address": hit["address"], "sent": ok,
                        "excerpt": hit["excerpt"]})

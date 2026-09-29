@@ -52,7 +52,7 @@ class Stats:
             for a in json.loads(self._hist_file.read_text())[-500:]:
                 self.alerts.append({"t": a["t"], "feed": a["feed"], "nature": a["nature"],
                                     "address": a["address"], "sent": a["sent"],
-                                    "outcome": a.get("outcome", ""), "voice": a.get("voice", "")})
+                                    "outcome": a.get("outcome", ""), "voice": a.get("voice", ""), "reason": a.get("reason", "")})
         except Exception:
             pass
 
@@ -103,7 +103,8 @@ class Stats:
                                    "file": filename, "transcript": transcript[:200]})
 
     def mark_alert(self, profile: str, nature: str, address: str, ok: bool,
-                   failed: bool = True, outcome: str = "", voice_url: str = "") -> None:
+                   failed: bool = True, outcome: str = "", voice_url: str = "",
+                   reason: str = "") -> None:
         with self._lock:
             f = self.feed(profile)
             f["last_alert_at"] = time.time()
@@ -115,13 +116,13 @@ class Stats:
             out = outcome or ("sent" if ok else ("failed" if failed else "suppressed"))
             self.alerts.appendleft({"t": time.time(), "feed": profile,
                                     "nature": nature, "address": address, "sent": ok,
-                                    "outcome": out, "voice": voice_url})
+                                    "outcome": out, "voice": voice_url, "reason": reason[:160]})
             self.events.appendleft({"t": time.time(), "feed": profile,
                                     "msg": f"ALERT {out}: {nature} @ {address}"})
             try:
                 hist = [{"t": a["t"], "feed": a["feed"], "nature": a["nature"],
                          "address": a["address"], "sent": a["sent"],
-                         "outcome": a.get("outcome", ""), "voice": a.get("voice", "")}
+                         "outcome": a.get("outcome", ""), "voice": a.get("voice", ""), "reason": a.get("reason", "")}
                         for a in sorted(list(self.alerts), key=lambda x: -x["t"])[:500]]
                 self._hist_file.parent.mkdir(parents=True, exist_ok=True)
                 self._hist_file.write_text(json.dumps(hist))
@@ -169,7 +170,7 @@ class Stats:
                     {"ts": a["t"], "feed": a["feed"], "nature": a["nature"],
                      "address": a["address"], "sent": a["sent"],
                      "outcome": a.get("outcome") or ("sent" if a["sent"] else "failed"),
-                     "voice": a.get("voice", "")}
+                     "voice": a.get("voice", ""), "reason": a.get("reason", "")}
                     for a in sorted(list(self.alerts), key=lambda x: -x["t"])[:500]
                 ],
                 "clips": [
@@ -282,78 +283,55 @@ setInterval(tick,5000);
 
 
 def _archive_html(snap: dict) -> str:
-    def esc(x):
-        return html.escape(str(x))
-
-    def _fix_casing(addr: str) -> str:
-        return re.sub(r"\b(\d+)(RD|ST|AVE|TH|ND)\b", lambda m: m.group(1) + m.group(2).lower(),
-                      addr, flags=re.I)
-
-    cards = []
-    data = []
-    skipped_no_nature = 0
-    for a in snap.get("alert_history", []):
-        if not (a.get("nature") or "").strip():
-            skipped_no_nature += 1
-            continue
-        a = dict(a)
-        a["address"] = _fix_casing(a["address"])
-        when = datetime.fromtimestamp(a["ts"], ZoneInfo("America/New_York")).strftime("%m-%d %H:%M")
-        outcome = (a.get("outcome") or ("sent" if a["sent"] else "failed")).upper()
-        cls = "ok" if a["sent"] else ("bad" if outcome == "FAILED" else "warn")
-        voice = a.get("voice") or ""
-        player = (f'<audio controls preload="none" src="{esc(voice)}"></audio>' if voice
-                  else '<span class="dim">no recording</span>')
-        cards.append(
-            f'<div class="job" data-s="{esc((when + " " + a["feed"] + " " + (a["nature"] or "") + " " + a["address"]).lower())}">'
-            f'<div class="jrow"><span class="dim mono">{when}</span>'
-            f'<span class="{cls} jres">{esc(outcome)}</span></div>'
-            f'<div class="jnat">{esc(a["nature"] or "-")}</div>'
-            f'<div class="jaddr">{esc(a["address"])}</div>'
-            f'<div class="jmeta"><span class="mono dim">{esc(a["feed"])}</span>{player}</div>'
-            f'</div>')
-        data.append(a)
-    jobs_html = "".join(cards) or '<div class="dim" style="padding:14px 0">no past jobs yet</div>'
-    total = len(data)
-    with_audio = sum(1 for a in data if a.get("voice"))
-
-    js = """
-function filt(){
- const q=document.getElementById("q").value.trim().toLowerCase();
- let n=0;
- document.querySelectorAll(".job").forEach(j=>{
-  const show=!q||j.dataset.s.includes(q);
-  j.style.display=show?"":"none"; if(show)n++;
- });
- document.getElementById("cnt").textContent=n+" JOBS";
-}
-"""
-
-    return f"""<!doctype html><html><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>FDNY-SLIM ARCHIVE</title>
-<style>{_PAGE_CSS}
-.toplinks{{float:right;font-size:10px;letter-spacing:2px}}
-.toplinks a{{color:#82888f;margin-left:14px;text-decoration:none;border:1px solid #3a3e45;padding:4px 8px}}
-#q{{background:transparent;border:1px solid #3a3e45;color:#e8e9eb;padding:11px;width:100%;font:13px Arial,Helvetica,sans-serif;margin:6px 0 2px}}
-.job{{border-bottom:1px solid #262a30;padding:9px 0}}
-.jrow{{display:flex;justify-content:space-between;font-size:11px}}
-.jres{{font-weight:700;letter-spacing:1px}}
-.jnat{{font-weight:700;color:#e8e9eb;font-size:13px;margin-top:3px;letter-spacing:1px}}
-.jaddr{{color:#d6d8db;margin-top:1px}}
-.jmeta{{display:flex;justify-content:space-between;align-items:center;margin-top:5px;font-size:11px}}
-audio{{height:26px;width:170px}}
-.note{{color:#6d737c;font-size:11px;margin:4px 0 12px}}
-</style></head><body>
-<div class=hdr><div class=toplinks><a href="/">DASHBOARD</a><a href="settings">SETTINGS</a></div>
-<h1>FDNY-SLIM &nbsp;ARCHIVE</h1>
-<div class=sub>PAST DISPATCH JOBS &middot; CITY OF NEW YORK FIRE CHANNELS</div>
-</div>
-<input id=q type=text placeholder="Search address, nature, or date (e.g. 09-28)" oninput="filt()">
-<div class=note><span id=cnt>{total} JOBS</span> &middot; {with_audio} with recordings &middot; recordings kept off-site, survive restarts</div>
-{jobs_html}
-<script>{js}</script>
-</body></html>"""
+    """Private mobile incident ledger. Client refreshes only changed rows."""
+    count = len(snap.get("alert_history", []))
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Dispatch Control</title>
+<style>
+*{{box-sizing:border-box}}body{{margin:0;background:#111417;color:#f0f2f3;font:13px/1.5 Arial,Helvetica,sans-serif}}
+main{{max-width:920px;margin:auto;padding:14px}}header{{padding:15px 0;border-bottom:2px solid #7aa880}}
+h1{{margin:0;font-size:20px;letter-spacing:.4px}}p{{margin:5px 0;color:#aab1b7;font-size:12px}}
+.top{{display:flex;justify-content:space-between;align-items:center}}.live{{color:#7dbd89;font-size:11px;font-weight:bold}}
+.metrics{{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid #454c52;margin:18px 0}}
+.metric{{padding:10px;border-right:1px solid #454c52;font-size:10px;color:#aab1b7}}
+.metric:last-child{{border:0}}.metric b{{display:block;color:white;font-size:21px}}
+.bar{{display:flex;gap:8px;margin:15px 0;flex-wrap:wrap}}.bar button{{font-size:11px;padding:7px 9px;border:1px solid #454c52;background:transparent;color:#e0e4e6}}
+.bar button.active{{background:#e8edf0;color:#121517}}.job{{padding:11px;background:#171b1e;margin:0 0 4px;border:1px solid #313a3e;border-left:4px solid #e4b15d;line-height:1.5}}
+.job.sent{{border-left-color:#7dbd89}}.job.failed{{border-left-color:#d57c72}}
+.job strong{{display:block;font-size:15px}}.meta{{display:flex;justify-content:space-between;gap:5px;color:#aab1b7;font-size:11px;margin-bottom:3px}}
+.status{{font-weight:bold;font-size:10px}}.hold .status{{color:#e4b15d}}.sent .status{{color:#7dbd89}}.failed .status{{color:#d57c72}}
+small{{display:block;color:#aab1b7;font-size:11px;margin-top:3px}}audio{{display:block;margin-top:7px;width:min(100%,260px);height:30px}}
+.missing{{font-size:11px;color:#939da4;margin-top:7px}}input{{width:100%;padding:10px;background:#191d20;color:white;border:1px solid #4d555a;font-size:12px}}
+.foot{{color:#899299;font-size:10px;padding:12px 0}}.offline{{color:#e4b15d}}
+</style></head><body><main><header><div class="top"><h1>DISPATCH CONTROL</h1><div class="live" id="live">LIVE ●</div></div>
+<p>FDNY-SLIM · Private incident ledger · <a href="settings" style="color:#aab1b7">Settings</a> · <a href="/" style="color:#aab1b7">System status</a></p></header>
+<section class="metrics"><div class="metric"><b id="feed-count">--</b>FEEDS</div><div class="metric"><b id="posted-count">--</b>POSTED (LATEST 500)</div><div class="metric"><b id="held-count">--</b>HELD / FAILED</div></section>
+<p id="sync">Connecting...</p><input id="search" type="search" placeholder="Search address, nature, or feed" aria-label="Search alerts">
+<div class="bar" role="group" aria-label="Filter alerts"><button data-filter="all" class="active">ALL</button><button data-filter="sent">POSTED</button><button data-filter="suppressed">HELD</button><button data-filter="failed">FAILED</button></div>
+<section id="ledger" aria-live="polite">Loading {count} saved alerts...</section>
+<div class="foot">Old backfilled entries may have no recording or stored hold reason. Not for emergency use.</div></main>
+<script>
+const root=document.getElementById('ledger');let records=[],filter='all',fingerprint='';
+function esc(v){{return String(v??'').replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]))}}
+function draw(){{
+ const q=document.getElementById('search').value.toLowerCase().trim();
+ const list=records.filter(a=>{{let kind=a.sent?'sent':a.outcome==='failed'?'failed':'suppressed';return (filter==='all'||filter===kind)&&(!q||[a.address,a.nature,a.feed,a.reason].join(' ').toLowerCase().includes(q))}});
+ root.innerHTML=list.map(a=>{{const kind=a.sent?'sent':a.outcome==='failed'?'failed':'hold';const label=kind==='sent'?'POSTED':kind==='failed'?'FAILED':'HELD';
+ const time=new Date(a.ts*1000).toLocaleString('en-US',{{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',month:'2-digit',day:'2-digit',hour12:false}})+' ET';
+ let why=a.reason?a.reason:(kind==='hold'?'Reason not stored for this historical job':kind==='failed'?'Delivery failure - detail not stored':'Posted by system');
+ return `<article class="job ${{kind}}"><div class="meta"><time>${{esc(time)}}</time><span class="status">${{label}}</span></div><strong>${{esc(a.nature||'Nature not identified')}}</strong><div>${{esc(a.address||'Location not identified')}}</div><small>${{esc(a.feed)}} · ${{why}}</small>${{a.voice?`<audio controls preload="none" src="${{esc(a.voice)}}"></audio>`:'<div class="missing">Recording unavailable</div>'}}</article>`}}).join('')||'<p>No matching alerts.</p>';
+}}
+function activeAudio(){{return [...root.querySelectorAll('audio')].some(a=>!a.paused&&!a.ended)}}
+async function refresh(){{try{{let r=await fetch('history',{{cache:'no-store'}});if(!r.ok)throw Error(r.status);let d=await r.json();records=d.alerts||[];
+ let key=JSON.stringify(records);if(key!==fingerprint&&!activeAudio()){{fingerprint=key;draw()}}
+ document.getElementById('feed-count').textContent=Object.values(d.feeds||{{}}).filter(f=>f.ffmpeg_running).length+'/'+Object.keys(d.feeds||{{}}).length;
+ document.getElementById('posted-count').textContent=records.filter(a=>a.sent).length;
+ document.getElementById('held-count').textContent=records.filter(a=>!a.sent).length;
+ document.getElementById('sync').textContent='Updated '+new Date().toLocaleTimeString()+' · Updates every 5 seconds';document.getElementById('live').textContent='LIVE ●';document.getElementById('live').classList.remove('offline');
+ }}catch(e){{document.getElementById('live').textContent='OFFLINE ●';document.getElementById('live').classList.add('offline');document.getElementById('sync').textContent='Update failed; showing last known entries';if(!fingerprint)root.textContent='Alerts unavailable. Retry automatically in 5 seconds.'}}}}
+document.getElementById('search').addEventListener('input',draw);document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{{filter=b.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('active',x===b));draw()}});
+refresh();setInterval(refresh,5000);
+</script></body></html>"""
 
 
 def _control_html() -> str:
@@ -625,6 +603,13 @@ def make_app(stats: Stats) -> web.Application:
             raise web.HTTPNotFound()
         return web.Response(text=_archive_html(stats.snapshot()), content_type="text/html")
 
+    async def archive_history(req: web.Request) -> web.Response:
+        if not _ctl_ok(req):
+            raise web.HTTPNotFound()
+        snap = stats.snapshot()
+        return web.json_response({"alerts": snap["alert_history"], "feeds": snap["feeds"]},
+                                 headers={"Cache-Control": "no-store"})
+
     async def control_page(req: web.Request) -> web.Response:
         if not _ctl_ok(req):
             raise web.HTTPNotFound()
@@ -691,7 +676,7 @@ def make_app(stats: Stats) -> web.Application:
             try:
                 hist = [{"t": a["t"], "feed": a["feed"], "nature": a["nature"],
                          "address": a["address"], "sent": a["sent"],
-                         "outcome": a.get("outcome", ""), "voice": a.get("voice", "")}
+                         "outcome": a.get("outcome", ""), "voice": a.get("voice", ""), "reason": a.get("reason", "")}
                         for a in sorted(stats.alerts, key=lambda x: -x["t"])[:500]]
                 stats._hist_file.parent.mkdir(parents=True, exist_ok=True)
                 stats._hist_file.write_text(json.dumps(hist))
@@ -702,6 +687,7 @@ def make_app(stats: Stats) -> web.Application:
 
     app.router.add_post("/history", history_push)
     app.router.add_get("/c/{token}/", archive_page)
+    app.router.add_get("/c/{token}/history", archive_history)
     app.router.add_get("/c/{token}/settings", control_page)
     app.router.add_post("/c/{token}/set", control_set)
     app.router.add_get("/health", _health)
