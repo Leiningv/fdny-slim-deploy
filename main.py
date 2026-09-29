@@ -1276,6 +1276,63 @@ async def _post_held_review(profile: str, hit: dict, clip_name: str | None) -> N
         logging.warning("held review text send failed: %s", clip_name)
 
 
+async def _hatzalah_brooklyn_grid_corridor(hit: dict) -> tuple | None:
+    """One spoken Boro Park avenue between consecutive numbered streets.
+
+    The stream supplies Brooklyn context, but map geometry still has to prove
+    both roads cross that avenue in Kings County. No house or cross is inferred.
+    """
+    if hit.get("source", "").removeprefix("zello-") not in ("hatzolah", "hatzalah"):
+        return None
+    text = hit.get("excerpt") or ""
+    if re.search(r"\b(?:queens|bronx|manhattan|staten island|nassau|rockland|"
+                 r"sullivan|new jersey|nj|five towns|long island)\b", text, re.I):
+        return None
+    m = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th) (?:Ave|Avenue) between "
+                     r"(\d{1,3})(?:st|nd|rd|th) & (\d{1,3})(?:st|nd|rd|th) "
+                     r"(?:St|Street), Brooklyn, NY", hit.get("address") or "", re.I)
+    if not m:
+        return None
+    avenue, first, second = map(int, m.groups())
+    if not (1 <= avenue <= 25 and 35 <= first <= 65 and second == first + 1):
+        return None
+    from detect import _ordinal_street_num
+    road = f"{_ordinal_street_num(avenue)} Avenue, Brooklyn, NY"
+    try:
+        points = await asyncio.gather(*(
+            asyncio.wait_for(_intersection_point(road, f"{_ordinal_street_num(st)} Street"), timeout=18)
+            for st in (first, second)))
+    except Exception:
+        return None
+    if any(lat is None or lon is None for lat, lon in points):
+        return None
+    import math
+    gap = math.hypot((points[0][0] - points[1][0]) * 111000,
+                     (points[0][1] - points[1][1]) * 85000)
+    if not 20 <= gap <= 750:
+        return None
+    # Reverse checks attach both independently found junctions to Kings County,
+    # instead of trusting the parsed Brooklyn suffix or a matching road elsewhere.
+    try:
+        async with aiohttp.ClientSession() as ses:
+            async def kings(point):
+                async with ses.get("https://nominatim.openstreetmap.org/reverse",
+                                   params={"lat": point[0], "lon": point[1],
+                                           "format": "json", "addressdetails": 1},
+                                   headers={"User-Agent": "fdny-slim/1.0 (dispatch monitor)"},
+                                   timeout=aiohttp.ClientTimeout(total=6)) as rsp:
+                    data = await rsp.json() if rsp.status == 200 else {}
+                area = data.get("address") or {}
+                return ("Kings" in (area.get("county") or "") or
+                        area.get("city_district") == "Kings County") and area.get("state") == "New York"
+            if not all(await asyncio.gather(*(kings(pt) for pt in points))):
+                return None
+    except Exception:
+        return None
+    return ((points[0][0] + points[1][0]) / 2,
+            (points[0][1] + points[1][1]) / 2)
+
+
 async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None,
                             fresh_ts: float | None = None,
                             audio_ts: float | None = None, spoken_time: str = "",
@@ -1385,6 +1442,12 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                     pair_safe = area.get("city_district") == "Kings County" and area.get("state") == "New York"
                 except Exception:
                     pair_safe = False
+        grid_point = None
+        if not pair_safe:
+            grid_point = await _hatzalah_brooklyn_grid_corridor(hit)
+        if grid_point is not None:
+            hit["verified_brooklyn_grid_point"] = grid_point
+            pair_safe = True
         if not pair_safe and not await locality_gate.default_area_safe(hit, hit.get("excerpt") or ""):
             stats.event(profile, f"suppressed (ambiguous default borough): {hit['address']}")
             ops_log(f"suppressed (ambiguous default borough): {hit['address']}")
@@ -1495,6 +1558,13 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                     stats.event(profile, f"spoken corner unresolved; verified primary road only: {primary}")
         else:
             verified, in_sullivan, verified_label, lat, lon, locality = await geocode_verify(hit["address"], profile)
+        # The standard address geocoder cannot parse a bare "between" block.
+        # Only the two-junction Kings County check above can certify it.
+        if hit.get("verified_brooklyn_grid_point") is not None and not verified:
+            lat, lon = hit["verified_brooklyn_grid_point"]
+            verified = True
+            verified_label = hit["address"]
+            locality = "Brooklyn"
         if (verified and locality and profile.lower().startswith(("hatzalah", "zello-hatzalah"))
                 and locality.lower() not in ("brooklyn", "queens", "manhattan", "bronx", "new york", "staten island")):
             state_suffix = "NJ" if hit["address"].upper().endswith(", NJ") else "NY"
