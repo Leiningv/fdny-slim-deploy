@@ -224,7 +224,12 @@ def ready_segments(profile: str, seg_dir: Path) -> list[Path]:
     in the last few seconds while a newer file exists is final.
     """
     now = time.time()
-    files = [p for p in seg_dir.glob(f"{profile}-*.wav") if p.stat().st_size > 44]
+    # The Zello PTT recorder also writes profile-prefixed WAVs. Only numeric
+    # legacy ring slots belong to this fallback path; mixing the PTT files
+    # here would splice streams and double-process the same dispatch.
+    files = [p for p in seg_dir.glob(f"{profile}-*.wav")
+             if re.fullmatch(re.escape(profile) + r"-\d{3}\.wav", p.name)
+             and p.stat().st_size > 44]
     if len(files) < 2:
         return []
     newest_mtime = max(p.stat().st_mtime for p in files)

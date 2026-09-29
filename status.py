@@ -36,6 +36,72 @@ ARCHIVE_DIR = Path(os.environ.get("ARCHIVE_DIR", "./segments/archive"))
 ARCHIVE_KEEP = int(os.environ.get("ARCHIVE_KEEP", "10"))  # clips per feed
 
 
+def plain_reason(reason: str, address: str = "") -> str:
+    """Human-readable display. Raw machine reason remains stored for audits."""
+    labels = {
+        "no nature": "Units were talking, but no clear complaint was said.",
+        "no verified location": f"Heard {address}, but could not match it to a verified location.",
+        "unconfirmed, no box": f"Heard {address}, but could not verify the location or fire alarm box.",
+        "feed muted": "This feed is paused, so no alert was posted.",
+        "dup incident": "This appears to repeat an alert already handled.",
+        "bare box": "A box number was heard, but no street address was confirmed.",
+        "ambiguous default borough": "The borough was not said clearly enough to confirm the location.",
+        "mixed Walk/other address": "The recording may contain two addresses from different calls, so they were not combined.",
+        "terminal street box mismatch": "The heard street did not match the listed fire alarm box.",
+        "box-only location unverified": "The fire alarm box did not identify one verified Brooklyn location.",
+        "box-only location incomplete": "The listed box location did not give two usable crossing streets.",
+        "box-only crosses uncorroborated": "The spoken crossing streets did not match the listed box location.",
+        "box-only intersection unverified": "The box's intersection could not be verified on the map.",
+        "outside Sullivan Co": "The verified location is outside Sullivan County.",
+        "Rockland dispatch": "The dispatcher named a Rockland-area location, outside this feed's alert area.",
+        "spoken crossing roads not verified": "The two spoken crossing roads could not both be verified.",
+        "spoken crossings not a bounded block": "The spoken crossing roads did not form a short, verifiable block.",
+        "ambiguous five-digit box/house": "The spoken numbers could be split into a box and address more than one way.",
+        "ambiguous box/house split": "The box and house numbers could not be separated reliably.",
+        "no box obtainable": "The FDNY address was verified, but a usable box number could not be found.",
+        "FDNY qualifier needs independent audio check": "A detail of the FDNY call needs a second audio check before posting.",
+        "FDNY street spelling needs independent audio check": "The spoken FDNY street spelling needs a second audio check before posting.",
+    }
+    if reason in labels: return labels[reason]
+    if reason.startswith("spoken cross unverified:"):
+        return f"The spoken cross street {reason.split(':', 1)[1].strip()} could not be verified."
+    if reason.startswith("stale audio"):
+        return "The audio was too old to post as a live alert."
+    if reason.endswith("excluded by controls"):
+        return "This kind of call is turned off in alert settings."
+    return reason
+
+
+def plain_event(msg: str) -> str:
+    """Convert compact suppression codes before showing or sending ops text."""
+    m = re.match(r"^(?:suppressed|held) \(([^)]+)\):?\s*(.*)$", msg, re.I)
+    if not m:
+        return msg
+    code, detail = m.groups()
+    if code in ("spoken cross unverified", "spoken crosses unverified"):
+        reason = plain_reason("spoken cross unverified: " + detail)
+        return f"Held: {reason}"
+    if code in ("spoken crossings geometry",):
+        return "Held: The spoken crossing roads could not be verified as one short block."
+    if code in ("dup incident", "duplicate incident"):
+        code = "dup incident"
+    if code in ("bare box", "no discernible nature"):
+        code = "bare box" if code == "bare box" else "no nature"
+    if code in ("stale", "stale audio") or code.startswith("stale,"):
+        code = "stale audio"
+    if code in ("spoken crosses unverified",):
+        code = "spoken crossing roads not verified"
+    if code in ("no box obtainable", "box-only crosses uncorroborated"):
+        detail = ""
+    reason = plain_reason(code, detail.split(" @ ")[-1] if code in ("no verified location", "unconfirmed, no box") else "")
+    if reason == code:
+        if code.endswith(" excluded"):
+            reason = "This kind of call is turned off in alert settings."
+        else:
+            reason = f"This call was held because {code.replace('_', ' ')}."
+    return f"Held: {reason}" + (f" {detail}" if detail and code not in ("no verified location", "unconfirmed, no box") else "")
+
+
 class Stats:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -77,7 +143,7 @@ class Stats:
 
     def event(self, profile: str, msg: str) -> None:
         with self._lock:
-            self.events.appendleft({"t": time.time(), "feed": profile, "msg": msg[:300]})
+            self.events.appendleft({"t": time.time(), "feed": profile, "msg": plain_event(msg)[:300]})
 
     def mark_segment(self, profile: str) -> None:
         with self._lock:
@@ -170,7 +236,7 @@ class Stats:
                     {"ts": a["t"], "feed": a["feed"], "nature": a["nature"],
                      "address": a["address"], "sent": a["sent"],
                      "outcome": a.get("outcome") or ("sent" if a["sent"] else "failed"),
-                     "voice": a.get("voice", ""), "reason": a.get("reason", "")}
+                     "voice": a.get("voice", ""), "reason": plain_reason(a.get("reason", ""), a.get("address", ""))}
                     for a in sorted(list(self.alerts), key=lambda x: -x["t"])[:500]
                 ],
                 "clips": [
