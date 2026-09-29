@@ -461,6 +461,17 @@ def extract_audio_crosses(text: str) -> str | None:
         r = _pair(m.group(1), m.group(2))
         if r:
             return r
+    # "362 Lafayette Avenue, Classon and Grand Avenue": the first cross
+    # drops its street type in radio shorthand. Anchor AFTER the complete
+    # numbered address; never consume the address's Avenue as a cross.
+    m = re.search(r"\b\d{1,5}\s+(?:[A-Z][a-z.'-]+\s+){1,3}"
+                  r"(?:Street|St|Avenue|Ave|Road|Rd|Place|Pl)\s*[,;]?\s+"
+                  r"([A-Z][a-z.'-]{2,})\s+and\s+"
+                  r"([A-Z][a-z.'-]{2,}\s+(?:Street|St|Avenue|Ave|Road|Rd|Place|Pl))\b", t)
+    if m:
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
     # Spoken bare pair after a numbered, typed job address. No map spelling
     # is invented: the bare names are preserved and checked downstream.
     m = re.search(r"\b\d{1,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\s+"
@@ -1172,6 +1183,19 @@ def get_nature(text: str, profile: str = "") -> str:
             r"smoke\s+in\s+the\s+area)\b", t)
         if complaint and not _negative_fire_context(t):
             return _addr_title(complaint.group("nature"))
+    # A phone-alarm transmission can name a real smoke complaint with a
+    # numeric floor readout. Keep the complaint ahead of alarm fallback;
+    # require the full spoken phrase, never infer a floor from a loose digit.
+    if profile == "fdny" and not _negative_fire_context(t):
+        floor = re.search(r"\bsmoke\s+(?:in|on|at)\s+(?:the\s+|an?\s+)?"
+                          r"(?:(?:number|no\.?)\s+)?"
+                          r"(?P<level>\d{1,2}(?:st|nd|rd|th)?|"
+                          r"one|two|three|four|five|six|seven|eight|nine|ten|"
+                          r"first|second|third|fourth|fifth|sixth|seventh|"
+                          r"eighth|ninth|tenth)\s+floor\b", t)
+        if floor and not re.search(r"\b(?:no|not|without|negative)\s+$",
+                                   t[max(0, floor.start()-12):floor.start()]):
+            return _addr_title(floor.group(0))
     v = vt(r"\b(?:rubbish fire|garbage fire|trash fire|rubbish)\b")
     if v: return v
     v = vt(r"\b(?:outside fire|brush fire)\b")
@@ -1780,4 +1804,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
-    }
+        }
