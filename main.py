@@ -2951,6 +2951,28 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             r"[A-Za-z][A-Za-z ]+\s+(?:Place|Street|Avenue|Road)\b",
             hit.get("cross") or "", re.I):
         hold_reason = "FDNY numbered corner cross needs independent audio check"
+    # A specific complaint in the vendor's own reading cannot be silently
+    # replaced with a transmission-type fallback. Keep the audio for review.
+    # This is active independently of the experimental second-ASR path.
+    import fdny_audio_gate
+    if not hold_reason and fdny_audio_gate.unclassified_fire_complaint(text, nature):
+        hold_reason = "FDNY specific fire complaint unclassified; audio review required"
+    # Bounded trial: only re-hear otherwise sendable weak fallback incidents.
+    # Disabled until the independent service has a demonstrated success rate.
+    # An unavailable pass cannot certify a post; the existing vendor/sender
+    # gates remain in force when this trial is off.
+    if (not hold_reason and os.environ.get("FDNY_WEAK_AUDIO_GATE", "0") == "1"
+            and re.match(r"^(?:phone alarm|fire alarm|automatic alarm|alarm activation)\b", nature, re.I)):
+        independent = ""
+        if clip_name:
+            try:
+                independent = await asyncio.wait_for(asyncio.to_thread(
+                    transcribe.second_listen, ARCHIVE_DIR / clip_name, "fdny"), timeout=25)
+            except Exception as exc:
+                logging.warning("[fdny] independent check failed (%s)", type(exc).__name__)
+        reason = fdny_audio_gate.compare_weak_fdny(hit, independent)
+        if reason:
+            hold_reason = reason
     if not hold_reason and re.search(r"\b(?:basement|cellar|dwelling)\b", nature, re.I):
         hold_reason = "FDNY dwelling detail needs independent audio check"
     elif not hold_reason and re.fullmatch(r"\d{1,5}\s+[A-Za-z][A-Za-z' -]+?\s+"
