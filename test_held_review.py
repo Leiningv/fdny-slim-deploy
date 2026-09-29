@@ -10,7 +10,8 @@ class ReviewText(unittest.TestCase):
     def test_no_nature_question_is_explained(self):
         text = main._held_review_text('zello-sullivan',
             {'nature': '', 'address': 'Monticello, NY', 'hold_reason': 'no nature'})
-        self.assertIn('parsed the location as Monticello, NY', text)
+        self.assertIn('parsed the location as Monticello', text)
+        self.assertNotIn('Monticello, NY', text)
         self.assertIn('What complaint does the dispatcher actually say', text)
         self.assertNotIn('no clear complaint', text)
 
