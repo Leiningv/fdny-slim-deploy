@@ -125,8 +125,20 @@ def _local_transcribe(wav_path: str) -> str:
         logging.error("whisper model failed to load: %s", e)
         return ""
     try:
+        # Input from the ingest workers is already 16 kHz mono PCM WAV. Decode
+        # it with stdlib and pass samples directly: PyAV on Render can lack
+        # av.open(metadata_errors=...), which faster-whisper's path decoder
+        # calls before ASR starts. This keeps the local fallback usable when
+        # AssemblyAI returns empty, without relaxing the upstream RMS gate.
+        import numpy as np
+        with wave.open(wav_path, "rb") as wav:
+            if wav.getnchannels() != 1 or wav.getframerate() != 16000 or wav.getsampwidth() != 2:
+                raise ValueError("local ASR expects 16kHz mono 16-bit PCM WAV")
+            samples = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2").astype(np.float32) / 32768.0
+        if not samples.size:
+            return ""
         segments, _info = model.transcribe(
-            wav_path, beam_size=1, vad_filter=True,
+            samples, beam_size=1, vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500})
         return " ".join(s.text.strip() for s in segments).strip()
     except Exception as e:  # noqa: BLE001
