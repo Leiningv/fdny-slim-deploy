@@ -1416,7 +1416,15 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             spoken_cross_verified = False
         if spoken_cross_verified:
             stats.event(profile, f"spoken cross map-verified: {spoken_cross} at {base_road}")
-    if " & " in hit["address"].split(",")[0] and cross.lower() == hit["address"].split(",")[0].lower():
+    if profile == "fdny" and hit.get("class3_house_address") and cross and "&" in cross:
+        # For a Class 3 + exact house address, ASR may join one nearby cross
+        # with a distant road from another assignment. The house and box are
+        # independently verified; omit this unverified cross pair entirely.
+        # This leaves established cross behavior for other FDNY calls alone.
+        cross = ""
+    if " & " in hit["address"].split(",")[0] and (
+            cross.lower() == hit["address"].split(",")[0].lower() or
+            (direct_pair_verified and cross.lower() == direct_candidate.lower())):
         cross = ""  # the spoken intersection already IS the location line
     if cross and "&" not in cross and lat is not None and lon is not None \
             and verified_label:

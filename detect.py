@@ -118,6 +118,10 @@ def get_hatzolah_area(text: str) -> str:
                                  ("rego park", "Queens"), ("flushing", "Queens"),
                                  ("glendale", "Queens"), ("manhattan beach", "Brooklyn")):
         if re.search(rf"\b{re.escape(neighborhood)}\b", t):
+            # A road named Flushing Avenue is not the Queens neighborhood;
+            # let an explicit borough or verified map point decide instead.
+            if neighborhood == "flushing" and re.search(r"\bflushing\s+(?:avenue|ave)\b", t):
+                continue
             return region
     for name in ("Staten Island", "Riverdale", "Manhattan", "Brooklyn", "Queens", "Bronx"):
         pattern = (r"\bmanhattan\b(?!\s+beach)" if name == "Manhattan"
@@ -349,13 +353,25 @@ def extract_cross_street(text: str) -> str | None:
         if 1 <= a <= 25 and 1 <= b <= 199 and c == b + 1:
             return (f"{_ordinal_street_num(a)} Ave between "
                     f"{_ordinal_street_num(b)} & {_ordinal_street_num(c)} St")
-    # bare two-number Brooklyn grid: "units for 14 and 46"
-    m = re.search(r"(?<![\d-])(\d{1,2})\s+and\s+(\d{1,2})(?!\d)", t)
+    # Bare grid shorthand only counts in the location phrase itself. A later
+    # unit readout ("62 and 47 is by the car") cannot become an intersection
+    # merely because another part of the recording contains a complaint.
+    m = re.search(r"\b(?:for|at|on|in|to)\s+(\d{1,2})\s+and\s+(\d{1,2})(?!\d)", t)
     if m:
-        a, b = int(m.group(1)), int(m.group(2))
-        if 1 <= a <= 99 and 1 <= b <= 99 and a != b:
-            lo, hi = min(a, b), max(a, b)
-            return f"{_ordinal_street_num(lo)} Ave & {_ordinal_street_num(hi)} St"
+        # Even with "for", a radio unit pair may be read in the same
+        # multi-job chunk. If a named location and its house-number anchor
+        # appear, never let an unrelated bare pair outrank that location.
+        named_anchor = re.search(
+            r"\b(?:for|at|on|to)\s+[A-Za-z][A-Za-z'-]+\s+and\s+"
+            r"[A-Za-z][A-Za-z'-]+\b", t) and re.search(
+            r"\b\d{1,5}\s*,?\s+[A-Za-z][A-Za-z'-]+\b", t)
+        tail = t[m.end():m.end()+36]
+        unit_tail = re.match(r"\s+(?:is\s+by|are\s+by|\w+\s+(?:respond|copy)|units?\b)", tail)
+        if not named_anchor and not unit_tail:
+            a, b = int(m.group(1)), int(m.group(2))
+            if 1 <= a <= 99 and 1 <= b <= 99 and a != b:
+                lo, hi = min(a, b), max(a, b)
+                return f"{_ordinal_street_num(lo)} Ave & {_ordinal_street_num(hi)} St"
     return None
 
 
@@ -720,6 +736,17 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
             _norm(text), re.I)
         if south_house:
             return _with_area(f"{south_house.group(1)} South {south_house.group(3)} Street",
+                              profile, text)
+        # Spoken AFA Class 3 followed by its four-digit assignment/box and a
+        # separate full house address: "Class 32372, 714 East 83 Street".
+        # Keep the house independent of the alarm number. The sender verifies
+        # the physical address and compares any candidate box against NYC data.
+        class_house = re.search(
+            r"\b(?:AFA\s+)?class\s*3\s*\d{4}\s*[,;]?\s*"
+            r"(\d{1,5})\s+((?:East|West|North|South)\s+\d{1,3}"
+            r"(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", text, re.I)
+        if class_house:
+            return _with_area(f"{class_house.group(1)} {_addr_title(class_house.group(2))}",
                               profile, text)
         # A box readout is not a house number. When dispatch gives only a
         # bare numbered street with spoken crosses, preserve that street.
@@ -1249,6 +1276,24 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                        "Kent Avenue and Wilson Street", t, flags=re.I)
             t = re.sub(r"\bWilson\s+and\s+Kent\b",
                        "Kent Avenue and Wilson Street", t, flags=re.I)
+    if profile == "hatzolah":
+        # A dropped conjunction in the Bedford/Flushing radio readout is
+        # recoverable only with the separate spoken 725 Bedford anchor. The
+        # candidate is still tested at a real Brooklyn intersection by the
+        # sender; never treat an arbitrary 'X Y Park' as a road pair.
+        if re.search(r"\b725[,]?\s+Bedford\b", t, re.I) and re.search(
+                r"\bBedford(?:[-,]\s*|\s+)(?:Flushing|Flossing|Sloshingham)\s+(?:Park|apart)\b", t, re.I):
+            t = re.sub(r"\bBedford(?:[-,]\s*|\s+)(?:Flushing|Flossing|Sloshingham)\s+(?:Park|apart)\b",
+                       "Bedford Avenue and Flushing Avenue", t, flags=re.I)
+        # In this Kingston dispatch, two repeats of the named corner and an
+        # independent '377 Kingston' readout outweigh the later crew numbers
+        # 62/47. Only the real map intersection can make it postable.
+        if re.search(r"\b377[,]?\s+Kingston\b", t, re.I) and re.search(
+                r"\bKingston\s+and\s+Carroll\b", t, re.I):
+            t = re.sub(r"\bKingston\s+and\s+Carroll\b",
+                       "Kingston Avenue and Carroll Street", t, flags=re.I)
+            t = re.sub(r"\bKingston[,]?\s+Carroll[,]?\s+and\s+Crown\b",
+                       "Kingston Avenue and Carroll Street, Crown", t, flags=re.I)
     # A numbered Brighton road is often spoken as an ordinal word without
     # "Street" ("Brighton First and Brighton Beach Avenue"). Convert only
     # in an explicit location pair that includes the full second road. The
@@ -1396,6 +1441,13 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     # When ASR gives a five-digit glued box followed by a separate full
     # four-digit box in the same dispatch, trust the repeated full readout.
     box_heard = detect_box(t)
+    if profile == "fdny" and not box_heard:
+        class_boxes = re.findall(
+            r"\b(?:AFA\s+)?class\s*3\s*(\d{4})\s*[,;]?\s*"
+            r"\d{1,5}\s+(?:East|West|North|South)\s+\d{1,3}"
+            r"(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave)\b", t, re.I)
+        if len(class_boxes) >= 2 and len(set(class_boxes)) == 1:
+            box_heard = class_boxes[0]
     full_boxes = re.findall(r"\bbox\s+(\d{4})\b", t, re.I)
     if full_boxes and box_heard and len(re.search(r"\bbox\s+(\d+)\b", t, re.I).group(1)) > 4:
         box_heard = full_boxes[-1].zfill(4)
@@ -1421,6 +1473,10 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         # 280 chars - a late-spoken 'box NNNN' was missed and fell through
         # to the closest-box lookup)
         "box_heard": box_heard,
+        "class3_house_address": bool(profile == "fdny" and re.search(
+            r"\b(?:AFA\s+)?class\s*3\s*\d{4}\s*[,;]?\s*"
+            r"\d{1,5}\s+(?:East|West|North|South)\s+\d{1,3}"
+            r"(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave)\b", t, re.I)),
         "box_glue_ambiguous": box_glue_ambiguous,
         "raw_box_run": "" if box_only or terminal_street else (
             re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I).group(1)
