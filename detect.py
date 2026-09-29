@@ -748,6 +748,16 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         if class_house:
             return _with_area(f"{class_house.group(1)} {_addr_title(class_house.group(2))}",
                               profile, text)
+        # A spoken alarm/box ID followed by a separate numbered East/West
+        # street still has a house address. Do not turn the alarm ID into
+        # the house or let a later apartment numeral replace the house.
+        alarm_house = re.search(
+            r"\b(?:alarm|box)\s+\d{3,5}\s*[,;]?\s*"
+            r"(\d{1,5})\s+((?:East|West|North|South)\s+\d{1,3}"
+            r"(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", text, re.I)
+        if alarm_house:
+            return _with_area(f"{alarm_house.group(1)} {_addr_title(alarm_house.group(2))}",
+                              profile, text)
         # A box readout is not a house number. When dispatch gives only a
         # bare numbered street with spoken crosses, preserve that street.
         # This pattern is scoped to the box+street readout; a separate spoken
@@ -1200,12 +1210,58 @@ def split_dispatch_jobs(text: str, profile: str) -> list[str]:
             if text[a:b].strip(" .,\n")]
 
 
+def _hatzalah_mixed_backup_medic(text: str) -> bool:
+    """Fail closed on backup address plus later separate medic complaint.
+
+    Overlapping Zello clips often carry two jobs. The first full address may
+    be verified but cannot become the destination of a new medic request.
+    """
+    # Include a preceding "backup unit" request even if the clip has one
+    # conversational lead-in; do not treat bare later unit numbers as roads.
+    backup = re.search(r"\b(?:backup|back\s*up)\s+units?\b", text, re.I)
+    if not backup:
+        return False
+    addr_pat = (r"\b\d{1,5}\s+(?:[A-Za-z][A-Za-z'-]*\s+){0,3}"
+                r"(?:Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd|Drive|Dr|"
+                r"Place|Pl|Lane|Ln)\b")
+    addr = re.search(addr_pat, text[backup.start():], re.I)
+    if not addr:
+        return False
+    addr_end = backup.start() + addr.end()
+    before = text[:addr_end]
+    if get_nature(before, "hatzolah"):
+        return False
+    # Strong spoken request boundary, or a clear second street-number job
+    # following a backup address. Do not equate bare crew IDs with streets.
+    later = text[addr_end:]
+    medics = re.search(r"\b(?:can\s+we\s+get|we(?:'ll|\s+will|\s+are\s+going\s+to)\s+get)"
+                       r"\s+(?:the\s+)?medics?\b", later, re.I)
+    other_job = re.search(r"\b(?:medics?\s+)?\d{1,3}\s+(?:and|&)\s+"
+                          r"(?:\d{1,3}(?:st|nd|rd|th)?|[A-Za-z]+)\b.{0,30}"
+                          r"\b(?:elderly|chest\s+pain|difficulty\s+breathing)\b", later, re.I)
+    if not medics and not other_job:
+        return False
+    if not get_nature(later, "hatzolah"):
+        return False
+    # A same-job medic repeat that restates the EXACT backup address is not
+    # cross-job stitching. Different or absent address stays ambiguous.
+    first_address = re.search(addr_pat, before[backup.start():], re.I)
+    later_address = re.search(addr_pat, later, re.I)
+    if first_address and later_address and (re.sub(r"\s+", " ", first_address.group().lower().strip()) ==
+                                        re.sub(r"\s+", " ", later_address.group().lower().strip())):
+        return False
+    return True
+
+
 def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     """Return an alert dict, or None when this chunk should not alert."""
     source = profile
     profile = profile.removeprefix("zello-")  # zello-* reuses base grammar
     if profile == "hatzalah":  # source label spelling -> grammar spelling
         profile = "hatzolah"
+    if profile == "hatzolah" and _hatzalah_mixed_backup_medic(text):
+        logging.info("suppressed (mixed backup and medic jobs): %s", text[:160])
+        return None
     t = _merge_split_ordinals(_split_box_glue(_norm(text)))
     if profile == "hatzolah":
         # User-confirmed Hatzalah street-letter words. Replace only in an

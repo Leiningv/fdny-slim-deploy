@@ -1580,6 +1580,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             logging.warning("colony match failed: %s", e)
     box_disp = ""
     box_loc = ""
+    garbage_box = False
     box_mismatch = False
     if box_task is not None:
         try:
@@ -1631,12 +1632,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                     hit["address"] = corrected_addr
                     box_disp = heard
                 elif locality and not any(b.lower() == locality.lower() for _, b in rows):
-                    # the heard box exists ONLY in other boroughs than the
-                    # verified address - the digits are whisper-glued/mangled
-                    # ('box 957 70 Herkimer' -> 9577 = a QUEENS box posted on a
-                    # Brooklyn job with a flag, 9/28 8:03 AM; his verdict: a
-                    # wrong-borough box never posts). Kill it - closest-box
-                    # from the geocoded address takes over below.
+                    # A box recorded only in a different borough is unsafe
+                    # for the independently verified address. Drop the box.
+                    garbage_box = True
                     stats.event(profile, f"box killed (borough mismatch): heard {heard} ("
                                 + "; ".join(f"{l} {b}" for l, b in rows)
                                 + f") vs {hit['address']} ({locality})")
@@ -1645,12 +1643,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 else:
                     pick = next((l for l, b in rows
                                  if locality and b.lower() == locality.lower()), rows[0][0])
-                    box_disp = heard
-                    box_loc = re.sub(r"\bAt\b", "at", pick.title())
-                    box_mismatch = True
-                    stats.event(profile, f"box kept despite mismatch: Box {heard} - {box_loc} "
+                    garbage_box = True
+                    stats.event(profile, f"box discarded (verified address, mismatch): Box {heard} - {pick} "
                                          f"vs {hit['address']}")
-                    ops_log(f"box kept despite mismatch: Box {heard} - {box_loc} vs {hit['address']}")
+                    ops_log(f"box discarded (verified address, mismatch): Box {heard} - {pick} vs {hit['address']}")
             elif not box_disp:
                 logging.info("[%s] box mismatch: heard Box %s, lookup %s", profile, heard, rows)
                 stats.event(profile, f"box mismatch (not posted): heard {heard}, lookup "
@@ -1658,6 +1654,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 ops_log(f"box mismatch (not posted): heard Box {heard} @ {hit['address']}, "
                         f"lookup: " + "; ".join(f"{l} ({b})" for l, b in rows))
         elif heard:
+            garbage_box = True
             logging.info("[%s] box %s not in lookup DB - not posted", profile, heard)
             stats.event(profile, f"box {heard} not in lookup DB (not posted)")
     # A five-digit box+house run can equally be a four-digit box plus a
@@ -1697,22 +1694,17 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         box_loc = ""
         verified = True
         stats.event(profile, f"five-digit box/house independently resolved: Box {box_disp} @ {hit['address']}")
-    # Six-digit glued box/house runs have two plausible splits. Never post
-    # an uncorroborated guess or a mismatch warning as though the guessed box
-    # were spoken. A box location sharing the verified address/cross is the
-    # independent anchor for the chosen split.
-    if profile == "fdny" and hit.get("box_glue_ambiguous") and (not verified or not box_disp or box_mismatch):
+    # A glued box/house run has multiple plausible splits. Require a verified
+    # address before any post; never treat a box as proof of the house.
+    if profile == "fdny" and hit.get("box_glue_ambiguous") and not verified:
         stats.event(profile, f"suppressed (ambiguous box/house split): {hit['address']}")
         ops_log(f"suppressed (ambiguous box/house split): {hit['address']}")
         hit["hold_reason"] = "ambiguous box/house split"
         return "suppressed"
-    # user rules 9/28 13:12 ("the deal"): ADDRESS MANDATORY on every post -
-    # unconfirmed with no box anchor does not go out ("no such a thing a
-    # address doesn't get posted"); BOX ON EVERY FDNY POST - no heard box ->
-    # closest box to the address; no box obtainable -> the job does not post.
-    # Verified job survives an unrelated or wrong-borough spoken box.
-    # The closest Brooklyn box is selected below after the bad box dies.
-    if not verified and (profile != "fdny" or not box_disp):
+    # A verified address is mandatory. A box alone cannot rehabilitate an
+    # unverified ASR road spelling. A mismatched box is omitted, not swapped
+    # for another guessed box; a truly absent box still uses nearest lookup.
+    if not verified:
         reason = "unconfirmed, no box" if profile == "fdny" else "no verified location"
         logging.info("[%s] suppressed (%s): %s", profile, reason, hit["address"])
         stats.event(profile, f"suppressed ({reason}): {hit['nature']} @ {hit['address']}")
@@ -1720,7 +1712,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["hold_reason"] = reason
         return "suppressed"
     box_closest = False
-    if profile == "fdny" and not box_disp:
+    if profile == "fdny" and not box_disp and not garbage_box:
         nb_digits = nb_loc = None
         if verified and lat is not None and lon is not None:
             nb_digits, nb_loc, _ = await _nearest_box(lat, lon, locality)
@@ -1753,6 +1745,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             ops_log(f"suppressed (no box obtainable): {hit['nature']} @ {hit['address']}")
             hit["hold_reason"] = "no box obtainable"
             return "suppressed"
+    if profile == "fdny" and verified and garbage_box and not box_disp:
+        stats.event(profile, f"verified address posting without untrusted box: {hit['address']}")
     # North Shore Towers is a documented complex reached from the Grand
     # Central Parkway service road. Keep the broad highway geocode as the
     # verification gate, but display the spoken landmark and approach rather
@@ -2017,6 +2011,197 @@ def _fdny_fetch_clip(url: str, m4a: Path, wav: Path) -> Path | None:
         return None
 
 
+async def _fdny_independent_hearing(wav: Path) -> str:
+    """Higher-resolution local ASR for disputed FDNY speech, no cloud call.
+
+    The default tiny model lost Pitkin on the Barbey clip. A separate small
+    model is slower, so only call it for an added qualifier or spelling doubt.
+    """
+    def run() -> str:
+        from faster_whisper import WhisperModel
+        model = WhisperModel("small.en", device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(str(wav), beam_size=3, vad_filter=True)
+        return " ".join(s.text.strip() for s in segments).strip()
+    return await asyncio.wait_for(asyncio.to_thread(run), timeout=45)
+
+
+async def _fdny_repair_brooklyn_street(hit: dict, wav: Path, stats: Stats,
+                                       second: str | None = None) -> None:
+    """Narrow local correction of a failed Brooklyn street spelling.
+
+    Only a single named road within 180m of an exact verified house, a
+    nearby spoken cross, and both transcript readings can support it. This
+    cannot turn a numeric street, a missing house or an unverified road into
+    a guessed address. The normal sender still verifies the final candidate.
+    """
+    import difflib
+    addr = hit.get("address") or ""
+    m = re.fullmatch(r"(\d{1,5})\s+([A-Za-z][A-Za-z' -]+?)\s+"
+                     r"(Street|Avenue|Road|Place|Drive|Court), Brooklyn, NY", addr, re.I)
+    if not m or re.search(r"\d", m.group(2)):
+        return
+    # A numbered address from a second job in one clip cannot borrow this
+    # house's cross and phonetic road evidence.
+    vendor_houses = set(re.findall(
+        r"\b(\d{1,5})\s+[A-Za-z][A-Za-z' -]+?\s+"
+        r"(?:Street|Avenue|Road|Place|Drive|Court)\b", hit.get("excerpt") or "", re.I))
+    if vendor_houses != {m.group(1)}:
+        return
+    try:
+        verified = await geocode_verify(addr, "fdny")
+    except Exception:
+        return
+    if verified[0]:
+        return
+    vendor_street = (m.group(2) + " " + m.group(3)).lower()
+    excerpt = hit.get("excerpt") or ""
+    # The second recognizer is independent of the FDNY Calls ASR. A silent,
+    # partial or contradictory reading is not evidence for a map repair.
+    if second is None:
+        try:
+            second = await _fdny_independent_hearing(wav)
+        except Exception:
+            return
+    if not second or not re.search(r"\b(?:street|avenue|road|place|drive|court)\b", second, re.I):
+        return
+    # If the independent reader clearly contradicts the house number,
+    # fail closed. It may lose a leading digit (396 -> 96), but the
+    # surviving trailing digits must agree. A mixed separate job stays out.
+    other_houses = re.findall(r"\b(\d{1,5})\s+[A-Za-z]{4,15}\s+" +
+                              re.escape(m.group(3)) + r"\b", second, re.I)
+    if other_houses and any(not m.group(1).endswith(n) for n in other_houses):
+        return
+    # A numbered house must be present in the vendor transcript and not be
+    # contradicted by the second hearing (which can drop a leading digit).
+    if not re.search(r"\b" + re.escape(m.group(1)) + r"\s+" +
+                     re.escape(m.group(2)), excerpt, re.I):
+        return
+    # Only a short, distinctive vendor street spelling can be corrected;
+    # no swapping a known named street for an unrelated nearby one.
+    if len(m.group(2)) < 5:
+        return
+    # The city street-name index supplies candidates. Do not fish through
+    # generic geosearch's top fuzzy house hits; those omit the true road.
+    official = ("https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/arcgis/rest/"
+                "services/DCM_Street_Center_Line/FeatureServer/0/query")
+    stem = m.group(2).split()[0].upper()
+    params = {"where": f"Borough = 'Brooklyn' AND UPPER(Street_NM) LIKE '{stem[:4]}%'",
+              "outFields": "Street_NM,Borough", "returnGeometry": "false", "f": "json"}
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(official, params=params,
+                                timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                if resp.status != 200:
+                    return
+                features = (await resp.json()).get("features") or []
+    except Exception:
+        return
+    names = {str((f.get("attributes") or {}).get("Street_NM") or "") for f in features}
+    candidates = []
+    for road in names:
+        if road.lower() == vendor_street or not road.lower().endswith(m.group(3).lower()):
+            continue
+        if difflib.SequenceMatcher(None, road.lower(), vendor_street).ratio() < 0.85:
+            continue
+        candidate = f"{m.group(1)} {road.title()}, Brooklyn, NY"
+        try:
+            v, _, label, lat, lon, borough = await geocode_verify(candidate, "fdny")
+        except Exception:
+            continue
+        if not (v and lat is not None and lon is not None and borough.lower() == "brooklyn"
+                and label.lower().startswith(f"{m.group(1)} {road.lower()}")):
+            continue
+        candidates.append((candidate, lat, lon, road))
+    if len(candidates) != 1:
+        return
+    candidate, lat, lon, road = candidates[0]
+    # Official city street data confirms the nearby road and a second spoken
+    # cross within the same small radius. A shared borough alone is not proof.
+    official = ("https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/arcgis/rest/"
+                "services/DCM_Street_Center_Line/FeatureServer/0/query")
+    params = {"where": "Borough = 'Brooklyn'", "geometry": f"{lon},{lat}",
+              "geometryType": "esriGeometryPoint", "inSR": "4326",
+              "spatialRel": "esriSpatialRelIntersects", "distance": 180,
+              "units": "esriSRUnit_Meter", "outFields": "Street_NM,Borough",
+              "returnGeometry": "false", "f": "json"}
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(official, params=params,
+                                timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                if resp.status != 200:
+                    return
+                nearby = (await resp.json()).get("features") or []
+    except Exception:
+        return
+    roads = {str((f.get("attributes") or {}).get("Street_NM") or "").lower()
+             for f in nearby}
+    if road.lower() not in roads or vendor_street in roads:
+        return
+    # Require another named road near the candidate that occurs as a full
+    # street phrase in BOTH independent readings, not merely a generic type.
+    cross = [r for r in roads if r != road.lower() and len(r.split()[0]) >= 5
+             and any(difflib.SequenceMatcher(None, w.lower(), r.split()[0]).ratio() >= 0.82
+                     for w in re.findall(r"\b([A-Za-z]{5,15})\s+" +
+                                         re.escape(r.split()[-1]) + r"\b", excerpt, re.I))
+             and re.search(r"\b" + re.escape(r) + r"\b", second, re.I)]
+    if len(cross) != 1:
+        return
+    # Independent reading must also contain a similar street name; the
+    # official spelling is a correction, not a new unspoken street.
+    heard_roads = re.findall(r"\b([A-Za-z]{4,15})\s+" + re.escape(m.group(3)) + r"\b",
+                             second, re.I)
+    if not any(word[0].lower() == road[0].lower() and
+               difflib.SequenceMatcher(None, word.lower(), road.split()[0].lower()).ratio() >= 0.52
+               for word in heard_roads):
+        return
+    hit["address"] = candidate
+    stats.event("fdny", f"street spelling repaired with exact house and cross: {addr} -> {candidate}")
+
+
+async def _fdny_recheck_qualifiers(hit: dict, wav: Path, stats: Stats,
+                                   second: str | None = None) -> None:
+    """Independently re-hear post-bound apartment/floor/occupancy detail.
+
+    A repeated hallucination in the vendor ASR is still one source. If the
+    independent audio reading is absent or inconclusive, remove only the
+    unsupported detail, never manufacture an alternative qualifier.
+    """
+    nat = hit.get("nature") or ""
+    if not re.search(r"\b(?:apartment|apt\.?|floors?|basement|cellar|dwelling)\b", nat, re.I):
+        return
+    if second is None:
+        try:
+            second = await _fdny_independent_hearing(wav)
+        except Exception as e:  # noqa: BLE001
+            logging.warning("[fdny] qualifier recheck failed (%s)", e)
+            second = ""
+    apt = re.search(r",\s*Apartment\s+([A-Za-z0-9]+)", nat, re.I)
+    if apt:
+        detail = apt.group(1)
+        number = re.match(r"\d+", detail)
+        number_seen = bool(number and re.search(
+            r"\b(?:apartment|apt\.?)\s+" + re.escape(number.group()) + r"\b", second, re.I))
+        exact_seen = bool(re.search(r"\b(?:apartment|apt\.?)\s+" +
+                                    re.escape(detail) + r"\b", second, re.I))
+        if not exact_seen:
+            replacement = ", Apartment " + number.group() if number_seen else ""
+            nat = nat[:apt.start()] + replacement + nat[apt.end():]
+            stats.event("fdny", "unconfirmed apartment qualifier omitted")
+    if re.search(r"\bsmoke\s+in\s+the\s+(?:basement|cellar)\s+of\s+a\s+"
+                 r"(?:private|multiple)\s+dwelling\b", nat, re.I):
+        if not re.search(r"\bsmoke\s+in\s+the\s+(?:basement|cellar)\s+of\s+a\s+"
+                         r"(?:private|multiple)\s+dwelling\b", second, re.I):
+            nat = "Smoke" if re.search(r"\bsmoke\b", second, re.I) else ""
+            stats.event("fdny", "unconfirmed smoke-location detail omitted")
+    for qualifier in ("basement", "cellar", "floor"):
+        if re.search(r"\b" + qualifier + r"s?\b", nat, re.I) and not re.search(
+                r"\b" + qualifier + r"s?\b", second, re.I):
+            nat = re.sub(r",?\s*\b[^,]*\b" + qualifier + r"s?\b[^,]*",
+                         "", nat, flags=re.I).strip(", ")
+            stats.event("fdny", "unconfirmed location qualifier omitted")
+    hit["nature"] = nat
+
+
 async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                             send_lock: asyncio.Lock | None = None) -> None:
     stats.mark_segment("fdny")
@@ -2043,6 +2228,23 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             stats.event("fdny", f"detect error: {e}")
     parsed_at = time.monotonic()
     wav = await fetch_task if fetch_task else None
+    if hit and wav is not None:
+        needs_qual = bool(re.search(r"\b(?:apartment|apt\.?|floors?|basement|cellar|dwelling)\b",
+                                    hit.get("nature") or "", re.I))
+        needs_street = bool(re.fullmatch(
+            r"\d{1,5}\s+[A-Za-z][A-Za-z' -]+?\s+"
+            r"(?:Street|Avenue|Road|Place|Drive|Court), Brooklyn, NY",
+            hit.get("address") or "", re.I))
+        if needs_qual or needs_street:
+            try:
+                second = await _fdny_independent_hearing(wav)
+            except Exception as e:
+                logging.warning("[fdny] independent hearing failed (%s)", e)
+                second = ""
+            if needs_qual:
+                await _fdny_recheck_qualifiers(hit, wav, stats, second=second)
+            if needs_street:
+                await _fdny_repair_brooklyn_street(hit, wav, stats, second=second)
     fetched_at = time.monotonic()
     if not text and wav is not None:
         text = await asyncio.to_thread(transcribe.transcribe, wav)
