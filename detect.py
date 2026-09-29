@@ -1238,6 +1238,15 @@ def get_nature(text: str, profile: str = "") -> str:
     # Only this spoken phrase, not a bare "smoke", earns the separate nature.
     v = vt(r"\b(?:odou?r\s+of\s+)?smoke\s+in\s+the\s+area\b")
     if v: return "Smoke in the area"
+    # In a single-box FDNY phone-alarm dispatch, an explicitly spoken odor
+    # of smoke is the complaint even without the word "reporting". Keep
+    # negated claims and ambiguous multi-box clips out.
+    if (profile == "fdny" and not _negative_fire_context(t)
+            and len(set(re.findall(r"\bbox\s*(\d{2,4})\b", t, re.I))) <= 1):
+        odor_smoke = re.search(r"\bodou?r\s+of\s+smoke\b", t)
+        if odor_smoke and not re.search(r"\b(?:no|not|without|negative)\s+$",
+                                        t[max(0, odor_smoke.start()-18):odor_smoke.start()]):
+            return "Odor of Smoke"
     # A phone-alarm transmission with a job-local smoke complaint and the
     # callers' apartment is a smoke job, not a mere transmission type. The
     # apartment is captured below; require this complete complaint wording,
@@ -1827,4 +1836,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
-    }
+        }
