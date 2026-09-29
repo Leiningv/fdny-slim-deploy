@@ -111,7 +111,10 @@ def unnumbered_with_spoken_building(transcript: str, parsed_address: str) -> str
     Do not synthesize an address from this match: a positive result is a hold.
     Box digits and numbered street ordinals are not house numbers.
     """
-    if re.match(r"^\s*\d{1,5}[A-Za-z]?\s+", parsed_address):
+    # Queens house numbers use a two-part hyphenated form (159-22). The
+    # second half is not an unparsed building, and a numbered candidate has
+    # already preserved the house. Still hold when the candidate is bare.
+    if re.match(r"^\s*\d{1,5}(?:-\d{1,4})?[A-Za-z]?\s+", parsed_address):
         return ""
     for match in _NUMBERED_BUILDING.finditer(transcript):
         prefix = transcript[max(0, match.start() - 7):match.start()]

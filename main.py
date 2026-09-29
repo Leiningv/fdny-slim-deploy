@@ -330,12 +330,16 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                 # what keeps 'X & Y' verifiable at all)
                 sides = _street_sides(core)
                 if not any(_street_token_groups(s) for s in sides):
-                    # no rare token at all ('The Street' -> 'the street'):
-                    # type-only chatter verifies against ANY fuzzy hit
-                    # ('1 THE ST OF CULTURE' posted 6:25 AM 9/28). Short
-                    # generic cores are unverifiable; longer ones must match
-                    # the label verbatim.
-                    if len(core.split()) <= 2 or core not in ltok:
+                    # Numbered NYC avenues like 8th Avenue have no rare word.
+                    # The map's borough feature is checked in _planning_labs;
+                    # demand the SAME house and normalized road here. Without
+                    # this, 1615 8th Avenue is rejected despite an exact map
+                    # label. Unnumbered generic chatter still fails closed.
+                    from fdny_borough_gate import exact_numbered_fdny_match
+                    exact_house = ("fdny" in p and
+                                   exact_numbered_fdny_match(q, label) and
+                                   bool(re.match(r"^\s*\d{1,5}(?:-\d{1,3})?[A-Za-z]?\s+", q)))
+                    if not exact_house and (len(core.split()) <= 2 or core not in ltok):
                         logging.info("geocode: rejected generic-street fallback: %s -> %s", q, label)
                         continue
                 elif not any(_side_verifies(s, ltok) for s in sides):
@@ -344,6 +348,11 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                     # (the shul name) was ignored (bad post 9/28 12:46 PM)
                     logging.info("geocode: rejected partial-token fallback: %s -> %s", q, label)
                     continue
+                if "fdny" in p:
+                    from fdny_borough_gate import exact_numbered_fdny_match
+                    if not exact_numbered_fdny_match(q, label):
+                        logging.info("geocode: rejected mismatched numbered FDNY address: %s -> %s", q, label)
+                        continue
                 # Planning Labs labels use neighborhoods (Jamaica, NY) rather
                 # than boroughs (Queens); the feature borough property is
                 # checked by _planning_labs, and exact numbered house/road is
@@ -2011,7 +2020,7 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     if hit.get("apartment"):
         lines.append(hit["apartment"])
     if crosses:
-        lines.append(f"bet {crosses}" if "&" in crosses else f"off {crosses}")
+        lines.append(f"BET- {crosses}" if "&" in crosses else f"off {crosses}")
     if box:
         line = f"Box {box}"
         if box_closest:
@@ -2573,6 +2582,30 @@ async def _fdny_recheck_qualifiers(hit: dict, wav: Path, stats: Stats,
     hit["nature"] = nat
 
 
+def _fdny_call_record(call: dict, transcript: str, clip_name: str | None,
+                      hit: dict | None, decision: str, reason: str = "") -> None:
+    """Best-effort audit record. Local Render Free storage is ephemeral.
+
+    Does not extend recording retention: audio path refers to the bounded
+    rotating archive and may cease to exist. A durable remote sink is pending.
+    """
+    try:
+        SEG_DIR.mkdir(parents=True, exist_ok=True)
+        row = {"id": str(call.get("id") or call.get("filename") or ""),
+               "ts": call.get("ts"), "audio_start_ts": call.get("audio_start_ts"),
+               "feed": "fdny", "transcript": transcript,
+               "audio_path": str(ARCHIVE_DIR / clip_name) if clip_name else "",
+               "audio_url": str(call.get("audio_url") or ""),
+               "nature": (hit or {}).get("nature", ""),
+               "address": (hit or {}).get("address", ""),
+               "decision": decision, "reason": reason,
+               "recorded_at": time.time()}
+        with (SEG_DIR / "fdny_call_records.jsonl").open("a") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as exc:  # audit failure must not manufacture a post
+        logging.error("[fdny] local audit record failed id=%s: %s", call.get("id"), exc)
+
+
 async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                             send_lock: asyncio.Lock | None = None) -> None:
     stats.mark_segment("fdny")
@@ -2629,15 +2662,18 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                  cid, parsed_at-stage_start, fetched_at-stage_start,
                  archived_at-stage_start)
     if not text:
+        _fdny_call_record(call, "", clip_name, None, "skipped", "no transcription")
         stats.event("fdny", "call with no transcription - detect skipped")
         return
     if not hit:
+        _fdny_call_record(call, text, clip_name, None, "skipped", "no parsed incident")
         return
     key = f"fdny|{hit['nature']}|{hit['address']}"
     now = time.time()
     if now - seen.get(key, 0) < DEDUP_SEC:
         logging.info("[fdny] deduped: %s @ %s", hit["nature"], hit["address"])
         stats.event("fdny", f"deduped: {hit['nature']} @ {hit['address']}")
+        _fdny_call_record(call, text, clip_name, hit, "suppressed", "duplicate incident")
         return
     seen[key] = now
     _save_seen(seen)
@@ -2654,6 +2690,14 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                    if conflict else (f"FDNY dispatch gave a numbered building ({numbered_heard}) "
                                      "but the parsed address lost its number"
                                      if numbered_heard else ""))
+    # A single Calls clip can contain two separate jobs. A global nature
+    # classifier otherwise attaches the later job's complaint to the first
+    # job's numbered address. Distinct spoken boxes are a conservative
+    # boundary: hold rather than publish an unproven nature/address pairing.
+    spoken_boxes = {m.group(1).zfill(4) for m in re.finditer(
+        r"\bbox\s*[,;:]?\s*(\d{3,5})\b", text, re.I)}
+    if not hold_reason and len(spoken_boxes) > 1:
+        hold_reason = "FDNY clip contains multiple distinct box jobs; complaint/address pairing unverified"
     # A single vendor ASR reading can drop a digit in a numbered cross (East
     # 22nd -> East 2nd). Without a second audio recognizer on the free tier,
     # hold that location detail instead of publishing a false block.
@@ -2661,6 +2705,16 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             r"\b(?:East|West|North|South|E|W|N|S)\s+\d{1,3}(?:st|nd|rd|th)?\s+"
             r"(?:Street|St|Avenue|Ave|Road|Rd)\b", hit.get("cross") or "", re.I):
         hold_reason = "FDNY numbered cross street needs an independent audio check"
+    # Vendor ASR can turn a second numbered house at a corner into a
+    # plausible numbered cross (1615 8th Ave / 1632 Windsor Place was read
+    # as 16th Street to Windsor Place). A map hit on the primary address
+    # cannot authenticate that block. Hold the whole call for audio review.
+    if not hold_reason and re.match(r"^\d+[A-Za-z-]*\s+\d+(?:st|nd|rd|th)?\s+"
+            r"(?:Avenue|Street|Road|Place)\b", address, re.I) and re.match(
+            r"^\d+(?:st|nd|rd|th)?\s+(?:Street|Avenue|Road|Place)\s*&\s*"
+            r"[A-Za-z][A-Za-z ]+\s+(?:Place|Street|Avenue|Road)\b",
+            hit.get("cross") or "", re.I):
+        hold_reason = "FDNY numbered corner cross needs independent audio check"
     if not hold_reason and re.search(r"\b(?:basement|cellar|dwelling)\b", nature, re.I):
         hold_reason = "FDNY dwelling detail needs independent audio check"
     elif not hold_reason and re.fullmatch(r"\d{1,5}\s+[A-Za-z][A-Za-z' -]+?\s+"
@@ -2681,6 +2735,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                          voice_url=hit.get("voice_url", ""), reason=hold_reason)
         _append_alert_log({"t": now, "feed": "fdny", "nature": nature,
                            "address": address, "sent": False, "excerpt": hit["excerpt"]})
+        _fdny_call_record(call, text, clip_name, hit, "suppressed", hold_reason)
         return
     try:
         call_ts = float(call.get("ts") or 0) or None
@@ -2704,6 +2759,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
     _append_alert_log({"t": now, "feed": "fdny", "nature": hit["nature"],
                        "address": hit["address"], "sent": ok,
                        "excerpt": hit["excerpt"]})
+    _fdny_call_record(call, text, clip_name, hit, outcome, hit.get("hold_reason", ""))
     logging.info("[fdny] ALERT %s @ %s - sent=%s", hit["nature"], hit["address"], ok)
 
 

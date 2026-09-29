@@ -359,7 +359,7 @@ def extract_cross_street(text: str) -> str | None:
     # Bare grid shorthand only counts in the location phrase itself. A later
     # unit readout ("62 and 47 is by the car") cannot become an intersection
     # merely because another part of the recording contains a complaint.
-    m = re.search(r"\b(?:for|at|on|in|to)\s+(\d{1,2})\s+and\s+(\d{1,2})(?!\d)", t)
+    m = re.search(r"\b(?:for|at|on|in|to|respond[,]?)\s+(\d{1,2})\s+and\s+(\d{1,2})(?!\d)", t)
     if m:
         # Even with "for", a radio unit pair may be read in the same
         # multi-job chunk. If a named location and its house-number anchor
@@ -570,6 +570,9 @@ def extract_direct_street_pair(text: str) -> tuple[str, str] | None:
                 ws.pop(0)
             return " ".join(ws)
         a, b = clean(a), clean(b)
+        # A regex span starting at an action word is not a road name:
+        # "respond to 13th avenue" must remain "13th avenue".
+        a = re.sub(r"^(?:respond|responding|dispatch|units?)\s+(?:to\s+)?", "", a, flags=re.I)
         if a and b and a.lower() != b.lower() and len(a) < 40 and len(b) < 40:
             return a, b
     return None
@@ -1505,7 +1508,11 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     elif numbered_before_cross:
         addr = extract_dispatch_address(t, profile)
     elif direct_pair:
-        addr = _with_area(direct_pair[0], profile, t)
+        # Explicit two-number grid is one intersection, not an arbitrary
+        # standalone first road. Named roads stay conservative: map-check
+        # the second as a candidate downstream.
+        numbered_grid = extract_cross_street(t) if profile == "hatzolah" else None
+        addr = _with_area(numbered_grid or direct_pair[0], profile, t)
     elif spoken_pair and "&" in spoken_pair and re.search(
             r"\b(?:for|at|on|of|in)\s+", t, re.I):
         addr = _with_area(spoken_pair, profile, t)
@@ -1559,7 +1566,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     metrotech_house = bool(profile == "fdny" and re.fullmatch(r"\d{1,3} MetroTech Center", street_part, re.I))
     sullivan_numbered_broadway = bool(profile == "sullivan" and re.fullmatch(
         r"\d{1,5}\s+(?:(?:East|West)\s+)?Broadway", street_part, re.I))
-    if not box_only and not metrotech_house and not sullivan_numbered_broadway and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
+    sullivan_route_exit = bool(profile == "sullivan" and re.fullmatch(r"Route \d{1,3}[A-Z]? at Exit \d{1,3}[A-Z]?", street_part, re.I))
+    if not box_only and not metrotech_house and not sullivan_numbered_broadway and not sullivan_route_exit and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
             and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
         logging.info("suppressed (no street type): %s", addr)
         return None

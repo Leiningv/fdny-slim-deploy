@@ -74,6 +74,63 @@ class TestExactFdnyAddress(unittest.TestCase):
             '225 Wortman Avenue, Brooklyn, NY', '226 WORTMAN AVE, Brooklyn, NY, USA'))
 
 
+class TestNumberedAvenueMapGate(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_1615_8th_avenue_is_verified(self):
+        from unittest.mock import AsyncMock, patch
+        import main
+        with patch.object(main, '_planning_labs', new_callable=AsyncMock,
+                          return_value=('1615 8 AVENUE, Brooklyn, NY, USA',
+                                        40.660813, -73.982471)):
+            result = await main.geocode_verify('1615 8th Avenue, Brooklyn, NY', 'fdny')
+        self.assertTrue(result[0])
+        self.assertEqual(result[2], '1615 8 AVENUE, Brooklyn, NY, USA')
+
+    async def test_live_planning_labs_exact_1615(self):
+        import main
+        result = await main.geocode_verify('1615 8th Avenue, Brooklyn, NY', 'fdny')
+        self.assertTrue(result[0], result)
+        self.assertEqual(result[2], '1615 8 AVENUE, Brooklyn, NY, USA')
+
+    async def test_same_road_wrong_house_stays_held(self):
+        from unittest.mock import AsyncMock, patch
+        import main
+        with patch.object(main, '_planning_labs', new_callable=AsyncMock,
+                          return_value=('1613 8 AVENUE, Brooklyn, NY, USA',
+                                        40.660813, -73.982471)):
+            result = await main.geocode_verify('1615 8th Avenue, Brooklyn, NY', 'fdny')
+        self.assertFalse(result[0])
+
+    async def test_second_corner_address_wrong_house_stays_held(self):
+        from unittest.mock import AsyncMock, patch
+        import main
+        with patch.object(main, '_planning_labs', new_callable=AsyncMock,
+                          return_value=('55 WINDSOR PLACE, Brooklyn, NY, USA',
+                                        40.661337, -73.983627)):
+            result = await main.geocode_verify('1632 Windsor Place, Brooklyn, NY', 'fdny')
+        self.assertFalse(result[0])
+
+
+class TestFdnyLocalAuditRecord(unittest.TestCase):
+    def test_record_full_transcript_and_decision(self):
+        import json, tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        import main
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(main, 'SEG_DIR', Path(d)), patch.object(main, 'ARCHIVE_DIR', Path(d)/'archive'):
+                main._fdny_call_record({'id':'call-1615', 'ts':123, 'audio_start_ts':120,
+                    'audio_url':'https://example.invalid/audio.m4a'},
+                    'Box 1311 at 1615 8th Avenue', 'clip.wav',
+                    {'nature':'Alarm Activation','address':'1615 8th Avenue, Brooklyn, NY'},
+                    'suppressed', 'numbered corner cross')
+                rows=(Path(d)/'fdny_call_records.jsonl').read_text().splitlines()
+        self.assertEqual(len(rows), 1)
+        row=json.loads(rows[0])
+        self.assertEqual((row['id'],row['transcript'],row['decision'],row['reason']),
+            ('call-1615','Box 1311 at 1615 8th Avenue','suppressed','numbered corner cross'))
+        self.assertTrue(row['audio_path'].endswith('/archive/clip.wav'))
+
+
 class TestBoxStreetConflict(unittest.TestCase):
     def test_fire_street_box(self):
         rows = [('BENNETT AVE & W 184 ST', 'Manhattan'),
@@ -148,6 +205,33 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
         self.assertIn('numbered cross street', row.kwargs['reason'])
         self.assertEqual(row.kwargs['voice_url'], 'https://example.invalid/cortelyou.ogg')
 
+    async def test_1615_corner_asr_numbered_cross_held_without_send(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import AsyncMock, Mock, patch
+        import main
+        transcript = ('Phone alarm. Phone alarm, Brooklyn Box 1311, 1615 8th Avenue, '
+                      '16th Street to Windsor Place for an alarm activation. Class 3, one '
+                      'correction, phone alarm 1311, 1615 8th Avenue, 16th Street to '
+                      'Windsor Place for an alarm activation.')
+        stats = Mock()
+        with tempfile.TemporaryDirectory() as d:
+            with (patch.object(main, '_fdny_fetch_clip', return_value=Path(d)/'clip.wav'),
+                  patch.object(main, '_archive_clip'), patch.object(main, '_save_seen'),
+                  patch.object(main, '_held_recording', new_callable=AsyncMock,
+                               return_value='https://example.invalid/1615.ogg'),
+                  patch.object(main, 'verify_and_send', new_callable=AsyncMock) as sender,
+                  patch.object(main, '_post_held_review', new_callable=AsyncMock),
+                  patch.object(main, '_append_alert_log'), patch.object(main, 'ops_log'),
+                  patch.object(main, '_kw_check', new_callable=AsyncMock)):
+                await main._fdny_handle_call({'id':'1615-test','transcription':transcript,
+                       'audio_url':'https://example.invalid/source.m4a'},
+                      stats, {}, Path(d))
+        sender.assert_not_awaited()
+        row = stats.mark_alert.call_args
+        self.assertEqual(row.kwargs['outcome'], 'suppressed')
+        self.assertIn('numbered corner cross', row.kwargs['reason'])
+
     async def test_floor_and_apartment_do_not_trigger_qualifier_hold(self):
         import tempfile
         from pathlib import Path
@@ -200,10 +284,12 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
                 await main._fdny_handle_call({'id':'test','transcription':transcript,
                                              'audio_url':'https://example.invalid/source.m4a'},
                                             stats, {}, Path(d))
-            # The parser now preserves Queens; verification, rather than a
-            # Brooklyn-default conflict, must reject the unverified location.
-            sender.assert_awaited_once()
-            self.assertEqual(sender.call_args.args[1]['address'], '656 Fire Street, Queens, NY')
+            # The parser preserves Queens; the fail-closed preliminary map
+            # check may hold the unverified street before verify_and_send.
+            sender.assert_not_awaited()
+            self.assertEqual(stats.mark_alert.call_args.kwargs['outcome'], 'suppressed')
+            self.assertIn('street spelling', stats.mark_alert.call_args.kwargs['reason'])
+            recording.assert_awaited_once()
 
 
 class TestNumberedAddressDropped(unittest.TestCase):
@@ -217,6 +303,14 @@ class TestNumberedAddressDropped(unittest.TestCase):
         self.assertEqual(unnumbered_with_spoken_building(
             'Box 4002, 519 Gateway Drive at Erskine Street, automatic alarm',
             '519 Gateway Drive, Brooklyn, NY'), '')
+
+    def test_queens_hyphenated_house_is_not_dropped(self):
+        transcript = ("We're announcing the Borough Queens, a second alarm transmitted, "
+                      "Box 4374, 159-22 Hillside Avenue, Parsons Boulevard to 160th Street.")
+        self.assertEqual(unnumbered_with_spoken_building(
+            transcript, "159-22 Hillside Avenue, Queens, NY"), "")
+        self.assertEqual(unnumbered_with_spoken_building(
+            transcript, "Hillside Avenue, Queens, NY"), "22 Hillside Avenue")
 
     def test_box_number_and_numbered_street_are_not_buildings(self):
         self.assertEqual(unnumbered_with_spoken_building(
@@ -353,6 +447,18 @@ class TestFdnySpokenBoroughFooter(unittest.TestCase):
         self.assertNotIn("FDNY Brooklyn Dispatch", msg)
 
 
+class TestCrossLabel(unittest.TestCase):
+    def test_bet_prefix_all_profiles(self):
+        import main
+        for address in ('426 Baltic Street, Brooklyn, NY',
+                        '159-22 Hillside Avenue, Queens, NY'):
+            with self.subTest(address=address):
+                text = main.format_alert({'source': 'fdny', 'nature': 'Alarm Activation',
+                                          'address': address}, crosses='Hoyt & Bond')
+                self.assertIn('BET- Hoyt & Bond', text)
+                self.assertNotIn('\nbet ', text)
+
+
 class TestSecondListenGate(unittest.IsolatedAsyncioTestCase):
     async def test_off_by_default_and_only_after_hold(self):
         import main
@@ -451,7 +557,10 @@ class TestIntersectionPosting(unittest.IsolatedAsyncioTestCase):
                 side_effect=lambda text: sent.append(text) or True), patch.object(
                 main, "_load_recent", return_value=[]), patch.object(
                 main, "_save_recent"), patch.object(main, "ops_log"), patch.object(
-                main, "_map_street_names", new_callable=AsyncMock, return_value=set()):
+                main, "_map_street_names", new_callable=AsyncMock, return_value=set()), patch.object(
+                main, "_cross_streets", new_callable=AsyncMock, return_value=("", False)), patch.object(
+                main, "_nearest_box", new_callable=AsyncMock, return_value=("", "", 0)), patch.object(
+                main, "_box_lookup", new_callable=AsyncMock, return_value=[]):
             outcome = await main.verify_and_send("fdny", hit, Mock(), None)
         self.assertEqual(outcome, "sent")
         self.assertEqual(len(sent), 1)
@@ -487,3 +596,31 @@ class TestRepeatedFdnyHouse(unittest.TestCase):
         self.assertEqual(h["nature"], "Automatic Alarm")
         self.assertTrue(exact_numbered_fdny_match(h["address"],
                         "1500 EAST 92 STREET, Brooklyn, NY, USA"))
+
+
+class TestMixedFdnyBoxClip(unittest.IsolatedAsyncioTestCase):
+    async def test_later_car_fire_does_not_attach_to_earlier_gas_address(self):
+        import main, detect, tempfile
+        from pathlib import Path
+        from unittest.mock import AsyncMock, Mock, patch
+        text = ("All Engine companies, Box 4194, 2370 East 72 Street, Avenue X Avenue W "
+                "odor gas in the area. All Engine companies, Box 4194, 2370 East 72 Street, "
+                "Avenue X Avenue W odor gas in the area. 5-7, signal Box 974, Clarkson Avenue "
+                "and Bergen Street for a car fire. 5-7.")
+        self.assertEqual(detect.analyze(text, "fdny")["address"],
+                         "2370 East 72 Street, Brooklyn, NY")
+        with tempfile.TemporaryDirectory() as d:
+            stats = Mock()
+            with (patch.object(main, "_fdny_fetch_clip", return_value=Path(d)/"x.wav"),
+                  patch.object(main, "_archive_clip"), patch.object(main, "_save_seen"),
+                  patch.object(main, "_kw_check", new_callable=AsyncMock),
+                  patch.object(main, "_held_recording", new_callable=AsyncMock, return_value=""),
+                  patch.object(main, "_post_held_review", new_callable=AsyncMock),
+                  patch.object(main, "_append_alert_log"), patch.object(main, "_fdny_call_record"),
+                  patch.object(main, "ops_log"), patch.object(main, "verify_and_send",
+                  new_callable=AsyncMock) as sender):
+                await main._fdny_handle_call({"id":"mixed-box","transcription":text,
+                    "audio_url":"https://example.invalid/x"}, stats, {}, Path(d))
+            sender.assert_not_awaited()
+            self.assertEqual(stats.mark_alert.call_args.kwargs["outcome"], "suppressed")
+            self.assertIn("multiple distinct box jobs", stats.mark_alert.call_args.kwargs["reason"])
