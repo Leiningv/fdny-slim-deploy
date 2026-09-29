@@ -42,6 +42,7 @@ EMERGENCY_PATTERNS = [
     r"\b(?:hatzalah|hatz|chevra)\s+(?:to|on|at)\b",
     r"\b(?:allergic|anaphylaxis|epi\s*pen|overdose|unresponsive|syncope|fall|bleeding|abdominal)\b",
     r"\b(?:full\s+trauma|trauma|traumatic)\b",
+    r"\b(?:general(?:ly)?\s+ill|general\s+illness)\b",
     r"\b(?:tree|trees|limb|branch).{0,35}(?:wire|wires|power\s*line|utility\s*line).{0,35}(?:down|burn|burning|fallen|arcing|spark)\b",
     r"\b(?:wire|wires|power\s*line).{0,35}(?:tree|trees|limb|branch).{0,35}(?:down|burn|burning|fallen)\b",
     r"\btree\s+(?:and|&)\s+wires?\s+(?:down|burning)\b",
@@ -844,6 +845,13 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         if named:
             return _with_area(named, profile, text)
     else:
+        # Broadway has no Street/Road suffix. Keep its spoken house only in
+        # a Sullivan medical dispatch; the sender still verifies exact house,
+        # road and county before any outgoing alert.
+        if profile == "sullivan":
+            bw = re.search(r"\b(\d{1,5})\s+((?:East|West)\s+)?Broadway\b", text, re.I)
+            if bw and re.search(r"\b(?:BLS|ALS|EMS)\s+response\b", text, re.I):
+                return _with_area(f"{bw.group(1)} {_addr_title((bw.group(2) or '') + 'Broadway')}", profile, text)
         # house number on a named street for the EMS/Sullivan grammar ('67 Old
         # Ryan Road' posted bare 9/28; '2 Marcel 4 Road' lost the 2 - one
         # trailing all-digit word is allowed inside the name: Marcel 4 Road =
@@ -993,7 +1001,7 @@ def get_nature(text: str, profile: str = "") -> str:
         return "Fall"  # tense cleanup only; Hatzalah 'Fall' exclusion depends on it
     v = vt(r"\b(?:bleeding|hemorrhage)\b")
     if v: return v
-    v = vt(r"\b(?:general illness|generally ill|gi distress)\b")
+    v = vt(r"\b(?:general illness|general ill|generally ill|gi distress)\b")
     if v: return v
     # Spoken medical complaint in the dispatch, not the response unit:
     # "elderly patient not feeling well" is a nature even without a prior
@@ -1523,7 +1531,9 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         logging.info("suppressed (type-only address): %s", addr)
         return None
     metrotech_house = bool(profile == "fdny" and re.fullmatch(r"\d{1,3} MetroTech Center", street_part, re.I))
-    if not box_only and not metrotech_house and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
+    sullivan_numbered_broadway = bool(profile == "sullivan" and re.fullmatch(
+        r"\d{1,5}\s+(?:(?:East|West)\s+)?Broadway", street_part, re.I))
+    if not box_only and not metrotech_house and not sullivan_numbered_broadway and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
             and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
         logging.info("suppressed (no street type): %s", addr)
         return None

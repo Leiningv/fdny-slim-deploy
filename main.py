@@ -54,7 +54,7 @@ async def _kw_check(profile: str, text: str) -> None:
 
 
 async def _uguu_upload(path: Path) -> str:
-    """Upload the voice-note OGG to uguu.se (free, permanent) -> durable URL."""
+    """Upload a short-lived archive copy of the voice-note OGG."""
     try:
         data = aiohttp.FormData()
         data.add_field("files[]", path.read_bytes(), filename=path.name,
@@ -87,8 +87,12 @@ async def _ops_flusher() -> None:
 def _ensure_ogg(clip_name: str):
     src = ARCHIVE_DIR / clip_name
     ogg = src.with_suffix(".ogg")
+    # A previous interrupted conversion may have left a zero-byte OGG. Never
+    # publish that path as a recording; force a fresh conversion instead.
     if ogg.exists():
-        return ogg.name
+        if ogg.stat().st_size > 100:
+            return ogg.name
+        ogg.unlink(missing_ok=True)
     try:
         try:
             import imageio_ffmpeg
@@ -1154,10 +1158,94 @@ async def _held_recording(clip_name: str | None) -> str:
     try:
         ogg = await asyncio.to_thread(_ensure_ogg, clip_name)
         if ogg:
-            return await _uguu_upload(ARCHIVE_DIR / ogg)
+            path = ARCHIVE_DIR / ogg
+            if path.stat().st_size > 100:
+                url = await _uguu_upload(path)
+                if url:
+                    # Uguu's success response alone is insufficient: the
+                    # hosting edge has occasionally served a zero-byte file.
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url, headers={"Range": "bytes=0-1023"},
+                                               timeout=aiohttp.ClientTimeout(total=8)) as rsp:
+                            head = await rsp.read()
+                            if rsp.status in (200, 206) and head.startswith(b"OggS"):
+                                return url
+                    logging.warning("held recording archive returned invalid audio: %s", url)
     except Exception as e:
         logging.warning("held recording upload unavailable: %s", e)
     return ""
+
+
+_REVIEW_SKIP = {"feed muted", "dup incident", "bare box", "Rockland dispatch",
+                "outside Sullivan Co"}
+
+
+def _held_review_text(profile: str, hit: dict) -> str:
+    """Explain only the actual parsed data and uncertainty, never invent a read."""
+    source = {"fdny": "FDNY Brooklyn", "sullivan": "Sullivan",
+              "hatzolah": "Hatzalah", "hatzalah": "Hatzalah"}.get(
+                  profile.removeprefix("zello-"), profile)
+    address = (hit.get("address") or "").strip()
+    nature = (hit.get("nature") or "").strip()
+    reason = (hit.get("hold_reason") or "").strip()
+    heard = (f"The system parsed {nature} at {address}." if nature and address else
+             f"The system parsed the location as {address}, but no complaint." if address else
+             f"The system parsed the complaint as {nature}, but no location." if nature else
+             "The system could not parse a complaint or location.")
+    if reason == "no nature":
+        uncertainty = "It could not identify a clear complaint from this recording, so it held the alert."
+        question = "What complaint does the dispatcher actually say, and is the parsed address right?"
+    elif reason == "ambiguous default borough":
+        uncertainty = "The recording did not establish the borough clearly enough to use the parsed address."
+        question = "Which borough and exact address does the dispatcher say?"
+    elif reason == "FDNY numbered cross street needs an independent audio check":
+        uncertainty = "A numbered crossing street could have been transcribed with the wrong digits."
+        question = "What are the crossing street's exact number and name in the audio?"
+    elif reason in ("no verified location", "unconfirmed, no box",
+                    "map did not confirm the exact FDNY house and street"):
+        uncertainty = "The exact house and street could not be confirmed against the map."
+        question = "What house number and street does the dispatcher say?"
+    elif reason.startswith("spoken cross unverified:"):
+        cross = reason.partition(":")[2].strip()
+        uncertainty = f"The heard crossing street {cross} could not be verified." if cross else "The heard crossing street could not be verified."
+        question = "Which crossing street is actually said, and is this one location?"
+    elif reason.startswith("FDNY dispatch gave a numbered building"):
+        uncertainty = "The numbered building heard in the audio was missing from the parsed address."
+        question = "Which number belongs to the building, rather than a crossing street or radio ID?"
+    else:
+        from status import plain_reason
+        uncertainty = plain_reason(reason, address)
+        if not uncertainty or uncertainty == reason:
+            uncertainty = "The location or complaint could not be checked well enough for a main-group alert."
+        question = "What does the dispatcher actually say for the complaint and exact location?"
+    return f"*Held {source} call - please check the recording*\n{heard} {uncertainty} {question}"
+
+
+async def _post_held_review(profile: str, hit: dict, clip_name: str | None) -> None:
+    """After owner format approval, send the review and the actual audio to ops."""
+    if os.environ.get("HELD_REVIEW_ENABLED", "0") != "1":
+        return
+    reason = (hit.get("hold_reason") or "").strip()
+    if not reason or reason in _REVIEW_SKIP:
+        return
+    if not clip_name or not alert_waha._ops_chat():
+        logging.warning("held review has no clip or ops destination: %s", reason)
+        return
+    ogg = await asyncio.to_thread(_ensure_ogg, clip_name)
+    if not ogg or not (ARCHIVE_DIR / ogg).exists() or (ARCHIVE_DIR / ogg).stat().st_size <= 100:
+        logging.warning("held review has no usable audio: %s", clip_name)
+        return
+    # Send text before voice, but only to the known ops destination. The
+    # service's /audio route supplies the bytes to WAHA right away; unlike an
+    # Uguu link, its address is not the delivered artifact.
+    chat = alert_waha._ops_chat()
+    text = _held_review_text(profile, hit)
+    if await alert_waha.send_text(text, chat_id=chat):
+        base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
+        if not await alert_waha.send_voice(f"{base}/audio/{ogg}", chat_id=chat):
+            logging.warning("held review audio send failed: %s", clip_name)
+    else:
+        logging.warning("held review text send failed: %s", clip_name)
 
 
 async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None = None,
@@ -2077,7 +2165,9 @@ async def ptt_consumer(profile: str, stats: Stats, seen: dict) -> None:
                     outcome=await verify_and_send(profile,hit,stats,clip_name,
                                                    fresh_ts=rec["start"],audio_ts=rec["start"])
                     ok=outcome=="sent"
-                    if outcome=="suppressed":hit["voice_url"]=await _held_recording(clip_name)
+                    if outcome=="suppressed":
+                        hit["voice_url"]=await _held_recording(clip_name)
+                        await _post_held_review(profile, hit, clip_name)
                     stats.mark_alert(profile,hit["nature"],hit["address"],ok,
                                      voice_url=hit.get("voice_url",""),failed=(outcome=="queued"),
                                      outcome=outcome,reason=hit.get("hold_reason",""))
@@ -2175,6 +2265,7 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
                 ok = outcome == "sent"
                 if outcome == "suppressed":
                     hit["voice_url"] = await _held_recording(clip_name)
+                    await _post_held_review(profile, hit, clip_name)
                 stats.mark_alert(profile, hit["nature"], hit["address"], ok,
                                  voice_url=hit.get("voice_url", ""),
                                  failed=(outcome == "queued"), outcome=outcome,
@@ -2506,6 +2597,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
         stats.event("fdny", f"held ({hold_reason}): {nature} @ {address}")
         ops_log(f"held ({hold_reason}): {nature} @ {address}")
         hit["voice_url"] = await _held_recording(clip_name)
+        await _post_held_review("fdny", hit, clip_name)
         stats.mark_alert("fdny", nature, address, False, failed=False, outcome="suppressed",
                          voice_url=hit.get("voice_url", ""), reason=hold_reason)
         _append_alert_log({"t": now, "feed": "fdny", "nature": nature,
@@ -2526,6 +2618,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
     ok = outcome == "sent"
     if outcome == "suppressed":
         hit["voice_url"] = await _held_recording(clip_name)
+        await _post_held_review("fdny", hit, clip_name)
     stats.mark_alert("fdny", hit["nature"], hit["address"], ok,
                      failed=(outcome == "queued"), outcome=outcome,
                      voice_url=hit.get("voice_url", ""), reason=hit.get("hold_reason", ""))
