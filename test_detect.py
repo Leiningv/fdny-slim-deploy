@@ -19,6 +19,28 @@ class TestDetect(unittest.TestCase):
         self.assertIsNotNone(hit)
         self.assertEqual(hit["address"], "14th Ave & 46th St, Brooklyn, NY")
 
+    def test_grid_command_not_a_street_and_unit_pair_not_a_place(self):
+        text = ("Hatzolah to Boro Park, respond to 13th avenue and 50th street, "
+                "for a patient with difficulty breathing")
+        hit = detect.analyze(text, "hatzolah")
+        self.assertEqual(hit["address"], "13th Ave & 50th St, Brooklyn, NY")
+        self.assertNotIn("respond", hit["address"].lower())
+        self.assertIsNone(detect.analyze(
+            "62 and 47 is by the car, patient is unresponsive", "hatzolah"))
+
+    def test_bare_grid_does_not_override_numbered_house(self):
+        hit = detect.analyze(
+            "Unit 62 and 47 respond for a cardiac arrest at 5014 15th Avenue", "hatzolah")
+        self.assertEqual(hit["address"], "5014 15th Avenue, Brooklyn, NY")
+
+    def test_sullivan_route_exit_only_complete_route_exit_candidate(self):
+        text = ("Sullivan county dispatch, Beaverkill Valley, route 17 exit 104, "
+                "motor vehicle accident with possible entrapment")
+        hit = detect.analyze(text, "sullivan")
+        self.assertEqual(hit["address"], "Route 17 at Exit 104, Sullivan Co, NY")
+        self.assertEqual(hit["nature"], "Motor Vehicle Accident")
+        self.assertIsNone(detect.analyze("Route 17 radio check", "sullivan"))
+
     def test_hatzolah_house_address_fall(self):
         t = "Hatzolah responding to 5014 15th avenue for an elderly fall"
         hit = detect.analyze(t, "hatzolah")
@@ -38,14 +60,14 @@ class TestDetect(unittest.TestCase):
         hit = detect.analyze(t, "sullivan")
         self.assertIsNotNone(hit)
         self.assertIn("Route 17 at Exit 104", hit["address"])
-        self.assertEqual(hit["nature"], "MVA")
+        self.assertEqual(hit["nature"], "Motor Vehicle Accident")
 
     def test_sullivan_area_suffix(self):
         t = "Monticello fire, route 42 and main street, report of a structure fire"
         hit = detect.analyze(t, "sullivan")
         self.assertIsNotNone(hit)
         self.assertTrue(hit["address"].endswith("Monticello, NY"), hit["address"])
-        self.assertEqual(hit["nature"], "Fire")
+        self.assertEqual(hit["nature"], "Structure Fire")
 
     def test_emergency_but_no_address_no_alert(self):
         t = "Hatzolah responding, patient with difficulty breathing, units stand by"
