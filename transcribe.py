@@ -157,7 +157,15 @@ def second_listen(wav_path: Path | str, profile: str) -> str:
     try:
         return _groq_transcribe(str(wav_path))
     except Exception as e:  # noqa: BLE001
-        logging.warning("[%s] second listen unavailable (%s)", profile, type(e).__name__)
+        # Status only: response bodies and headers may carry private data.
+        import urllib.error
+        status = e.code if isinstance(e, urllib.error.HTTPError) else None
+        category = ("rate_limited" if status == 429 else
+                    "access_rejected" if status in (401, 403) else
+                    "provider_error" if status and status >= 500 else
+                    "request_rejected" if status else "transport_or_decode_error")
+        logging.warning("[%s] second listen unavailable (%s; http_status=%s; category=%s)",
+                        profile, type(e).__name__, status or "none", category)
         return ""
 
 

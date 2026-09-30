@@ -307,6 +307,47 @@ def _side_verifies(side: str, target: str) -> bool:
     return bool(gs) and all(any(_tok_hit(v, target) for v in g) for g in gs)
 
 
+async def _resolve_fdny_suffixless(address: str):
+    """Only an exact map house/name can supply a missing road suffix."""
+    from fdny_borough_gate import _street_key
+    bits = address.split(",")
+    if len(bits) != 3 or bits[1].strip() not in (
+            "Brooklyn", "Queens", "Manhattan", "Bronx", "Staten Island"):
+        return None
+    borough = bits[1].strip()
+    from urllib.parse import quote
+    try:
+        url = "https://geosearch.planninglabs.nyc/v2/search?text=" + quote(address, safe="") + "&size=5"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                if response.status != 200:
+                    return None
+                data = await response.json()
+    except Exception:
+        return None
+    candidates = set()
+    heard = _street_key(bits[0])
+    suffixes = {"street", "avenue", "road", "drive", "place", "lane",
+                "boulevard", "court", "parkway", "terrace"}
+    for feature in data.get("features") or []:
+        props = feature.get("properties") or {}
+        if str(props.get("borough") or "").casefold() != borough.casefold():
+            continue
+        coords = (feature.get("geometry") or {}).get("coordinates") or []
+        if len(coords) < 2:
+            continue
+        first = str(props.get("label") or "").split(",", 1)[0].strip()
+        key = _street_key(first)
+        if any(key == heard + " " + suffix for suffix in suffixes):
+            candidates.add((key, first))
+    # Duplicate provider records of the same canonical house are harmless.
+    roads = {key for key, first in candidates}
+    if len(roads) != 1:
+        return None
+    first = sorted(candidates)[0][1]
+    return f"{first}, {borough}, NY"
+
+
 async def geocode_verify(addr: str, profile: str = "") -> tuple:
     """Returns (verified, in_sullivan_county, verified_label, lat, lon, locality).
     NYC profiles: Planning Labs, with FDNY restricted to the spoken borough.
@@ -1398,6 +1439,15 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         ops_log(f"suppressed ({hit.get('nature')} excluded): {hit['address']}")
         hit["hold_reason"] = f"{hit.get('nature')} excluded by controls"
         return "suppressed"
+    if profile == "fdny" and hit.get("suffixless_spoken_address"):
+        canonical = await _resolve_fdny_suffixless(hit["address"])
+        if not canonical:
+            hit["hold_reason"] = "suffixless spoken FDNY address not exactly map verified"
+            stats.event(profile, "Held: " + hit["hold_reason"])
+            return "suppressed"
+        hit["address"] = canonical
+        hit["box_only"] = False
+        stats.event(profile, "map supplied road type for explicit spoken house: " + canonical)
     box_task = None
     if profile == "fdny":
         heard = hit.get("box_heard") or _heard_box(hit.get("excerpt") or "")

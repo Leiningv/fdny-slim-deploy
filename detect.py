@@ -1470,6 +1470,28 @@ def extract_apartment(text: str) -> str:
     return ""
 
 
+def fdny_suffixless_address(text: str) -> str:
+    """Keep an explicit all-hands address; never infer its road type."""
+    if not re.search(r"\ball hands\b", text, re.I):
+        return ""
+    if len(set(re.findall(r"\bbox\s*(\d{2,4})\b", text, re.I))) != 1:
+        return ""
+    matches = list(re.finditer(
+        r"\b(?:the\s+)?address\s+is\s+(\d{1,5})\s+"
+        r"([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2}?)"
+        r"(?=[.,;]|$)", text, re.I))
+    values = {m.group(1) + " " + _addr_title(m.group(2)) for m in matches}
+    if len(values) != 1:
+        return ""
+    value = values.pop()
+    if re.search(r"\b(?:street|st|avenue|ave|road|rd|drive|dr|place|pl|lane|ln|"
+                 r"boulevard|blvd|court|ct|parkway|pkwy)\b", value, re.I):
+        return ""
+    if any(word.lower() in _NAME_STOP for word in value.split()[1:]):
+        return ""
+    return value
+
+
 def split_dispatch_jobs(text: str, profile: str) -> list[str]:
     """Split an overlapped Sullivan clip at a NEW dispatch opener, never at a
     repeat/second page within the same job. Nature and address must be read
@@ -1719,6 +1741,9 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         addr = _with_area(spoken_pair, profile, t)
     else:
         addr = extract_dispatch_address(t, profile)
+    suffixless = fdny_suffixless_address(t) if profile == "fdny" else ""
+    if suffixless:
+        addr = _with_area(suffixless, profile, t)
     if profile == "hatzolah" and addr and re.search(r"\b(?:staten island)\b", t, re.I):
         # The ASR drops/lengthens the final r on Kell Avenue. Correct only
         # when the dispatch itself says Staten Island and the named spoken
@@ -1770,7 +1795,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     sullivan_numbered_broadway = bool(profile == "sullivan" and re.fullmatch(
         r"\d{1,5}\s+(?:(?:East|West)\s+)?Broadway", street_part, re.I))
     sullivan_route_exit = bool(profile == "sullivan" and re.fullmatch(r"Route \d{1,3}[A-Z]? at Exit \d{1,3}[A-Z]?", street_part, re.I))
-    if not box_only and not metrotech_house and not fdny_numbered_broadway and not sullivan_numbered_broadway and not sullivan_route_exit and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
+    if not suffixless and not box_only and not metrotech_house and not fdny_numbered_broadway and not sullivan_numbered_broadway and not sullivan_route_exit and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
             and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
         logging.info("suppressed (no street type): %s", addr)
         return None
@@ -1901,4 +1926,5 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
+        "suffixless_spoken_address": suffixless,
         }
