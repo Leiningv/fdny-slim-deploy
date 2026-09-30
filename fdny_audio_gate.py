@@ -61,3 +61,11 @@ def compare_weak_fdny(primary: dict, second_text: str) -> str:
     if unclassified_fire_complaint(second_text, second_nature):
         return "FDNY independent audio contains unclassified fire complaint"
     return ""
+
+
+def generic_nature_invariant(transcript: str, nature: str) -> bool:
+    """Safety invariant, independent of phrase extraction and review flags."""
+    generic = re.fullmatch(r"(?:phone alarm|automatic alarm|fire alarm|alarm activation|class 3|fire|unknown|unknown problem)", (nature or "").strip(), re.I)
+    if not generic: return False
+    # These are evidence classes, not one dispatch's prefix wording.
+    return bool(re.search(r"\b(?:all[ -]?hands|going\s+to\s+work|working[ -]?fire|10[- ]?75|dwelling|fire)\b", transcript or "", re.I))

@@ -1390,6 +1390,13 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     Returns 'sent' | 'queued' | 'suppressed'."""
     now = time.time()
     verify_started = time.monotonic()
+    if profile == "fdny":
+        import fdny_audio_gate
+        source_text = (source_call or {}).get("transcription") or hit.get("excerpt") or ""
+        if fdny_audio_gate.generic_nature_invariant(source_text, hit.get("nature", "")):
+            hit["hold_reason"] = "FDNY generic nature conflicts with fire/escalation/dwelling evidence; terminal hold"
+            stats.event(profile, "Held: " + hit["hold_reason"])
+            return "suppressed"
     if profile in control.muted_feeds():
         logging.info("[%s] suppressed (feed muted): %s @ %s", profile, hit["nature"], hit["address"])
         stats.event(profile, f"suppressed (feed muted): {hit['nature']} @ {hit['address']}")
@@ -3078,7 +3085,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
     # This is active independently of the experimental second-ASR path.
     import fdny_audio_gate
     import audio_review
-    if not hold_reason and audio_review.complaint_lost(text, nature):
+    if not hold_reason and (fdny_audio_gate.generic_nature_invariant(text, nature) or audio_review.complaint_lost(text, nature)):
         hold_reason = "FDNY specific fire complaint unclassified; audio review required"
     # Bounded trial: only re-hear otherwise sendable weak fallback incidents.
     # Disabled until the independent service has a demonstrated success rate.

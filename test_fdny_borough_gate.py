@@ -295,7 +295,7 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
             # check may hold the unverified street before verify_and_send.
             sender.assert_not_awaited()
             self.assertEqual(stats.mark_alert.call_args.kwargs['outcome'], 'suppressed')
-            self.assertIn('street spelling', stats.mark_alert.call_args.kwargs['reason'])
+            self.assertIn('specific fire complaint unclassified', stats.mark_alert.call_args.kwargs['reason'])
             recording.assert_awaited_once()
 
 
