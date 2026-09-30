@@ -22,6 +22,7 @@ _model = None
 RMS_MIN = int(os.environ.get("RMS_MIN", "350"))
 AAI_KEY = os.environ.get("ASSEMBLYAI_API_KEY", "").strip()
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_EGRESS_URL = os.environ.get("GROQ_EGRESS_URL", "").strip()
 GROQ_ENABLED = os.environ.get("GROQ_ENABLED", "0") == "1"
 GROQ_TIMEOUT = float(os.environ.get("GROQ_TIMEOUT", "20"))
 AAI_TIMEOUT = float(os.environ.get("ASSEMBLYAI_TIMEOUT", "60"))
@@ -110,6 +111,27 @@ def _groq_transcribe(wav_path: str) -> str:
                f"whisper-large-v3\r\n--{boundary}\r\n"
                f"Content-Disposition: form-data; name=\"file\"; filename=\"dispatch.wav\"\r\n"
                f"Content-Type: audio/wav\r\n\r\n").encode() + audio + f"\r\n--{boundary}--\r\n".encode()
+    if GROQ_EGRESS_URL:
+        from urllib.parse import urlparse
+        target = urlparse(GROQ_EGRESS_URL)
+        if target.scheme != "https" or not target.hostname or target.hostname != "fdny-groq-egress-0930.yeshivehboy.workers.dev" or target.path != "/transcribe" or target.query or target.fragment or target.username or target.port not in (None, 443):
+            raise ValueError("invalid private egress target")
+        if len(audio) > 4 * 1024 * 1024:
+            raise ValueError("audio exceeds private egress bound")
+        req = urllib.request.Request(GROQ_EGRESS_URL, data=audio,
+            headers={"Authorization": "Bearer " + GROQ_KEY, "Content-Type": "audio/wav"})
+        class NoEgressRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                raise ValueError("egress redirect rejected")
+        opener = urllib.request.build_opener(NoEgressRedirect)
+        with opener.open(req, timeout=GROQ_TIMEOUT) as resp:
+            body = resp.read(65537)
+            if len(body) > 65536:
+                raise ValueError("egress response exceeds bound")
+            text = json.loads(body).get("text")
+            if not isinstance(text, str) or len(text) > 16000:
+                raise ValueError("invalid egress transcript")
+            return text.strip()
     req = urllib.request.Request(
         "https://api.groq.com/openai/v1/audio/transcriptions", data=payload,
         headers={"Authorization": "Bearer " + GROQ_KEY,
