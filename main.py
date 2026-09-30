@@ -1394,7 +1394,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         import fdny_audio_gate
         source_text = (source_call or {}).get("transcription") or hit.get("excerpt") or ""
         if fdny_audio_gate.generic_nature_invariant(source_text, hit.get("nature", "")):
-            hit["hold_reason"] = "FDNY generic nature conflicts with fire/escalation/dwelling evidence; terminal hold"
+            hit["hold_reason"] = "FDNY generic nature conflicts with specific complaint/escalation evidence; terminal hold"
             stats.event(profile, "Held: " + hit["hold_reason"])
             return "suppressed"
     if profile in control.muted_feeds():
@@ -1771,7 +1771,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if not all(verdicts):
             stats.event(profile, f"unverified spoken FDNY crosses omitted: {cross}")
             ops_log(f"unverified spoken FDNY crosses omitted: {cross} @ {hit['address']}")
-            cross = ""
+            hit["hold_reason"] = "FDNY spoken cross pair could not be verified; terminal hold"
+            stats.event(profile, "Held: " + hit["hold_reason"])
+            return "suppressed"
     if cross and lat is not None and lon is not None and verified_label \
             and profile.lower().removeprefix("zello-") != "sullivan":
         core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"].split(",")[0]).strip()

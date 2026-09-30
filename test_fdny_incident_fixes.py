@@ -53,7 +53,7 @@ class TestSpokenNature(unittest.TestCase):
 
 
 class TestCrossDecision(unittest.IsolatedAsyncioTestCase):
-    async def test_unverified_spoken_cross_omitted_on_numbered_fdny(self):
+    async def test_unverified_spoken_cross_holds_numbered_fdny(self):
         import main
         hit = detect.analyze('Phone Alarm Box 3243, 3021 Avenue Z, Ford Street to Batchelder Street, stove fire', 'fdny')
         sent = []
@@ -69,9 +69,9 @@ class TestCrossDecision(unittest.IsolatedAsyncioTestCase):
              patch.object(main.alert_waha, 'send_text', new_callable=AsyncMock,
                           side_effect=lambda text: sent.append(text) or True):
             result = await main.verify_and_send('fdny', hit, Mock(), None)
-        self.assertEqual(result, 'sent')
-        self.assertEqual(len(sent), 1)
-        self.assertNotIn('BET- Ford Street', sent[0])
+        self.assertEqual(result, 'suppressed')
+        self.assertEqual(len(sent), 0)
+        self.assertIn('spoken cross pair',hit['hold_reason'])
 
 
 if __name__ == '__main__':

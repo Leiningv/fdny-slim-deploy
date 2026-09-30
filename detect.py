@@ -1092,8 +1092,16 @@ def get_nature(text: str, profile: str = "") -> str:
         # nature - 'Rubbish 265' was a mangled unit readout and posted RUBBISH
         # on a fainting call. Skip digit-followed occurrences.
         for m in re.finditer(pattern, t):
-            if re.match(r"\s+\d{2,5}\b", t[m.end():]):
-                continue
+            number = re.match(r"\s+([0-9]{2,5})\b", t[m.end():])
+            if number:
+                # A terminal HHMM after a job-local complaint is a clock,
+                # not an apparatus number. Other digit-followed words stay out.
+                tail = t[m.end()+number.end():].strip(" .,!;:")
+                clock = (profile == "fdny" and not tail and
+                         re.fullmatch(r"(?:[01][0-9]|2[0-3])[0-5][0-9]", number.group(1)) and
+                         re.search(r"\b(?:for|reporting)\s+(?:an?\s+)?$", t[max(0,m.start()-25):m.start()]))
+                if not clock:
+                    continue
             return _addr_title(m.group(0))
         return ""
 

@@ -67,5 +67,16 @@ def generic_nature_invariant(transcript: str, nature: str) -> bool:
     """Safety invariant, independent of phrase extraction and review flags."""
     generic = re.fullmatch(r"(?:phone alarm|automatic alarm|fire alarm|alarm activation|class 3|fire|unknown|unknown problem)", (nature or "").strip(), re.I)
     if not generic: return False
-    # These are evidence classes, not one dispatch's prefix wording.
+    # Specific non-fire complaints must never degrade to a transmission
+    # label, even if extraction loses them. Require job-local wording and
+    # reject negated complaints; unrelated unit chatter supplies no nature.
+    for m in re.finditer(r"\b(?:for|reporting)\s+(?:an?\s+)?"
+                         r"(?:manhole(?:\s+(?:fire|smoke|explosion|cover))?|"
+                         r"elevator|water\s+(?:condition|leak)|burst\s+pipe|"
+                         r"wires\s+down|transformer|electrical(?:\s+condition)?|"
+                         r"carbon\s+monoxide|co\s+alarm|gas\s+(?:leak|odor)|"
+                         r"unstable\s+facade|unsafe\s+facade)\b", transcript or "", re.I):
+        if not _NEGATED.search((transcript or "")[max(0,m.start()-25):m.start()]):
+            return True
+    # Existing escalation/dwelling evidence remains an independent gate.
     return bool(re.search(r"\b(?:all[ -]?hands|going\s+to\s+work|working[ -]?fire|10[- ]?75|dwelling|fire)\b", transcript or "", re.I))
