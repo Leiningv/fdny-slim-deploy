@@ -1813,6 +1813,79 @@ def patient_age(text: str) -> str:
     return next(iter(distinct)) if len(distinct) == 1 else ""
 
 
+
+_STYPES_X = r"(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Drive|Dr|Place|Pl|Lane|Ln|Parkway|Pkwy|Terrace|Ter|Court|Ct)"
+_NAME_X = r"([A-Z][A-Za-z'\-]*(?:\s+[A-Z][A-Za-z'\-]*){0,2}?)"
+
+def extract_comma_cross(text: str, addr: str) -> str | None:
+    """Hatzalah comma cross: 'Kingston Avenue, Lincoln Place, in the restaurant'
+    -> 'Lincoln Place'.
+
+    Dispatch often reads the primary street, a comma, then the cross street
+    with its own type. Only adjacent comma-separated street mentions count;
+    the cross must differ from the incident street. Numbered streets are
+    covered by the existing numbered-cross machinery and are excluded here.
+    """
+    t = _norm(text)
+    primary = _canon_street(addr.split(",")[0]) if addr else ""
+    pat = re.compile(rf"\b{_NAME_X}\s+({_STYPES_X})\s*,\s*{_NAME_X}\s+({_STYPES_X})\b")
+    for m in pat.finditer(t):
+        p1 = f"{m.group(1)} {m.group(2)}"
+        p2 = f"{m.group(3)} {m.group(4)}"
+        if _canon_street(p1) == _canon_street(p2):
+            continue
+        if primary and _canon_street(p1) != primary:
+            continue
+        return p2
+    return None
+
+_PLACE_KIND_RE = r"(?:Restaurant|Diner|Pizzeria|Deli|Bakery|Caf(?:e|é)|Pharmacy|School|Shul|Yeshiva|Hotel|Motel|Bank|Supermarket|Market|Store|Bagel|Gas Station|Bar|Grill|Kosher)"
+
+def extract_named_place(text: str) -> str:
+    """Named venue spoken with the location: "Mendy's Restaurant on Kingston
+    Avenue" -> "Mendy's Restaurant"; 'in the restaurant' -> 'restaurant'.
+
+    Detail only - never an address substitute, never a house number source.
+    """
+    t = _norm(text)
+    m = re.search(rf"\b([A-Z][A-Za-z']+(?:'s)?(?:\s+[A-Z][A-Za-z']+(?:'s)?)?\s+{_PLACE_KIND_RE})\b", t)
+    if m:
+        return m.group(1)
+    m = re.search(rf"\b(?:in|at|inside|into|to)\s+(?:the\s+)?({_PLACE_KIND_RE})\b", t, re.I)
+    if m:
+        return m.group(1).lower()
+    return ""
+
+
+def extract_same_street_house(text: str, addr: str) -> str:
+    """A suffixless house repeat needs the same explicitly typed street here."""
+    core = re.sub(r"^\d+\s+", "", addr.split(",")[0]).strip()
+    typed = re.fullmatch(r"([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,2})\s+(Avenue|Street|Road|Place|Ave|St|Rd|Pl)", core, re.I)
+    if not typed or re.match(r"^\d", addr):
+        return addr
+    name = typed.group(1)
+    if not re.search(r"\b" + re.escape(core) + r"\b", text, re.I):
+        return addr
+    houses = re.findall(r"\b(\d{1,5})\s+" + re.escape(name) + r"(?=[.,;]|$)", text, re.I)
+    if len(set(houses)) != 1:
+        return addr
+    return houses[0] + " " + addr
+
+
+def extract_repeated_bare_cross(text: str, addr: str) -> str:
+    """'Walton, Walton and Harrison' repeats the primary before a bare cross.
+    The bare cross stays a candidate; only map proof can give it a type.
+    """
+    core = re.sub(r"^\d+\s+", "", addr.split(",")[0]).strip()
+    typed = re.fullmatch(r"([A-Za-z][A-Za-z.'-]+)\s+(?:Street|Avenue|Road|Place|St|Ave|Rd|Pl)", core, re.I)
+    if not typed:
+        return ""
+    name = typed.group(1)
+    m = re.search(r"\b" + re.escape(name) + r"\s*,\s*" + re.escape(name) +
+                  r"\s+(?:and|&)\s+([A-Z][A-Za-z.'-]+)(?=\s*[,.;])", text)
+    return m.group(1) if m and m.group(1).lower() != name.lower() else ""
+
+
 def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     """Return an alert dict, or None when this chunk should not alert."""
     source = profile
@@ -2081,6 +2154,13 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         logging.info("suppressed (dangling intersection address): %s", addr)
         return None
     cross = f"{three_roads[1]} & {three_roads[2]}" if three_roads else extract_audio_crosses(t)
+    retained_cross = ""
+    if profile == "hatzolah":
+        retained_cross = extract_comma_cross(t, addr) or extract_repeated_bare_cross(t, addr)
+    if not cross and retained_cross:
+        cross = retained_cross
+    if profile == "hatzolah":
+        addr = extract_same_street_house(t, addr)
     if not three_roads and direct_pair and cross and cross.split("&", 1)[0].strip().lower() == direct_pair[0].lower():
         cross = f"{direct_pair[0]} & {direct_pair[1]}"
     if terminal_street:
@@ -2204,6 +2284,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "patient_age": patient_age(text) if profile == "hatzolah" else "",
         "heard_location_evidence": _norm(text)[:600] if profile == "hatzolah" and "&" in addr else "",
         "apartment": apt if profile != "fdny" else "",
+        "place": extract_named_place(text) if profile == "hatzolah" else "",
+        "spoken_retained_cross": retained_cross,
         "address": addr,
         "area_defaulted": bool(profile == "hatzolah" and
             get_hatzolah_area(t) == "Brooklyn" and not

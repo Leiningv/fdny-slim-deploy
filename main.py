@@ -1716,6 +1716,30 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["hold_reason"] = "spoken between crosses unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
+    retained_cross = (hit.get("spoken_retained_cross") or "").strip()
+    if retained_cross:
+        if not hit.get("cross"):
+            hit["hold_reason"] = "spoken cross lost during extraction"
+            return "suppressed"
+        try:
+            if re.match(r"^\d+\s+", hit["address"]):
+                import spoken_cross as crossmap
+                core = re.sub(r"^\d+\s+", "", hit["address"].split(",")[0])
+                near_house = verified and await asyncio.wait_for(
+                    crossmap.verify(core, retained_cross, lat, lon), timeout=10)
+                point = (lat, lon) if near_house else (None, None)
+            else:
+                point = await asyncio.wait_for(_intersection_point(hit["address"], retained_cross), timeout=9)
+        except Exception:
+            point = (None, None)
+        if point[0] is None:
+            hit["hold_reason"] = f"spoken cross unverified: {retained_cross}"
+            stats.event(profile, "Held: " + hit["hold_reason"])
+            return "suppressed"
+        # This proof also anchors a bare primary street to its spoken junction.
+        lat, lon = point
+        verified = True
+        stats.event(profile, f"spoken cross map-verified: {retained_cross}")
     spoken_three = (hit.get("spoken_three_road_crosses") or "").strip()
     if spoken_three:
         # Both crossing roads were said after the primary road. Verify each
@@ -2220,6 +2244,8 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         lines.append(hit["patient_age"])
     if hit.get("apartment"):
         lines.append(hit["apartment"])
+    if (hit.get("source") or "").removeprefix("zello-") in ("hatzalah", "hatzolah") and hit.get("place"):
+        lines.append(hit["place"])
     if crosses:
         lines.append(f"C/s {crosses}")
     if box:
@@ -2432,6 +2458,12 @@ async def ptt_consumer(profile: str, stats: Stats, seen: dict) -> None:
                     if candidate:
                         text, hit = second, candidate
                 addr = (hit or {}).get("address", "")
+                if not addr and profile.removeprefix("zello-") in ("hatzalah", "hatzolah"):
+                    # Location-only repeats may enrich the SAME street recording.
+                    # They never supply a nature or bypass the grouping guard.
+                    addr = detect.extract_dispatch_address(text, "hatzolah") or ""
+                    if addr:
+                        addr = detect.extract_same_street_house(text, addr)
                 nature = (hit or {}).get("nature", "")
                 matched = None
                 for rec in pending:
