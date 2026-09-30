@@ -1101,6 +1101,12 @@ def get_nature(text: str, profile: str = "") -> str:
             if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$",
                              t[max(0,m.start()-40):m.start()]):
                 return _addr_title(m.group())
+    if profile == "hatzolah":
+        # Audio-grounded MVA misreading only inside a live bus dispatch.
+        # MBA as a degree, course, unit label or bare acronym stays unchanged.
+        m = re.search(r"\bfor\s+(?:an?|the)\s+mba\b", t)
+        if m and re.search(r"\bunits?\b.{0,45}\bload(?:ed)?\s+(?:up\s+)?(?:a\s+)?(?:queens\s+)?bus\s+at\b", t[:m.start()]) and not re.search(r"\b(?:no|not|negative|training|test|drill|degree|course|school)\b", t[:m.end()]):
+            return "Mva"
     # Preserve only adjacent, explicit compound complaints from one readout.
     compounds = []
     if profile == "sullivan":
