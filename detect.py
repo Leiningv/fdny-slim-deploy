@@ -739,7 +739,7 @@ def _split_box_glue(t: str) -> str:
     named street type follows, not a standalone box, date or radio code.
     """
     street_after = re.compile(
-        r"\s+(?:[A-Za-z][A-Za-z.'-]*\s+){0,3}"
+        r"\s*[,;]?\s+(?:[A-Za-z][A-Za-z.'-]*\s+){0,3}"
         r"(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|place|pl|"
         r"boulevard|blvd|parkway|pkwy)\b", re.I)
 
@@ -753,7 +753,7 @@ def _split_box_glue(t: str) -> str:
             if 1 <= len(house) <= 4 and house[0] != "0":
                 return f"box {run[:blen]}, {house}"
         return m.group(0)
-    return re.sub(r"\bbox\s+(\d{5,7})\b", _rep, t, flags=re.I)
+    return re.sub(r"\bbox\s+(\d{5,7})\b(?:\s*[,;])?", _rep, t, flags=re.I)
 
 
 def detect_box(text: str) -> str | None:
@@ -1225,6 +1225,11 @@ def get_nature(text: str, profile: str = "") -> str:
         return v
     if profile == "sullivan" and re.search(r"\b(?:female|male|patient|person)\b.{0,25}\bmental health\b", t) and not re.search(r"\b(?:no|not|negative)\s+mental health\b", t):
         return "Mental Health"  # spoken complaint only, no diagnosis added
+    if profile == "sullivan":
+        for m in re.finditer(r"\bankle injury\b", t):
+            if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$",
+                             t[max(0,m.start()-40):m.start()]):
+                return _addr_title(m.group())
     v = vt(r"\bchest pain\b")
     if v: return v
     v = vt(r"\bdrown\w*\b")
@@ -1790,11 +1795,11 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     if is_chatter(t):
         return None
     glued_box = re.search(
-        r"\bbox\s+\d{6}(?=\s+(?:[a-z][a-z.'-]*\s+){0,3}"
+        r"\bbox\s+\d{6}(?=\s*[,;]?\s+(?:[a-z][a-z.'-]*\s+){0,3}"
         r"(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|place|pl|"
         r"boulevard|blvd|parkway|pkwy)\b)", _norm(text), re.I)
     box_glue_ambiguous = bool(glued_box) or bool(re.search(
-        r"\bbox\s+\d{5}(?=\s+(?:[a-z][a-z.'-]*\s+){0,3}"
+        r"\bbox\s+\d{5}(?=\s*[,;]?\s+(?:[a-z][a-z.'-]*\s+){0,3}"
         r"(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|place|pl)\b)",
         _norm(text), re.I))
     # A repeated complete 4-digit box takes precedence over an earlier
