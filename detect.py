@@ -1168,6 +1168,13 @@ def get_nature(text: str, profile: str = "") -> str:
     v = vt(r"\b(?:mva|mvc|motor vehicle accident|rollover|entrapment|car accident|auto accident|vehicle accident)\b")
     if v: return v
     if profile == "hatzolah":
+        # Explicit dispatch complaint, not a diagnosis inferred from routing.
+        # A bare EDP unit label or mental-health training is not a complaint.
+        for m in re.finditer(r"\b(?:edp|psych)\s+situation\b", t):
+            if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$",
+                             t[max(0,m.start()-40):m.start()]):
+                return _addr_title(m.group())
+    if profile == "hatzolah":
         v = vt(r"\bnasal obstruction\b")
         if v and re.search(r"\b(?:child|patient|male|female)\b", t):
             return v
