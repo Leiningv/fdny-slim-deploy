@@ -5,20 +5,20 @@ class ExpresswayTests(unittest.TestCase):
  def test_candidate(self):
   hit=detect.analyze(TEXT,'fdny')
   self.assertIsNotNone(hit)
-  self.assertEqual(hit['address'],'Gowanus Expwy at Exit 17, Brooklyn, NY')
-  self.assertIn('Westbound',hit['nature'])
-  self.assertEqual(hit['cross'],'92 Street')
+  self.assertEqual(hit['address'],'Gowanus Expressway near Exit 17, 92 Street westbound, Brooklyn, NY')
+  self.assertIn('westbound',hit['address'])
+  self.assertEqual(hit['cross'],'')
  def test_chatter_not_candidate(self):
   self.assertIsNone(detect.analyze('Engine17 responding westbound on the Gowanus Expressway','fdny'))
 
 class SenderTests(unittest.IsolatedAsyncioTestCase):
- async def test_unverified_exit_cannot_send(self):
+ async def test_spoken_exit_owner_no_map_rule(self):
   from unittest.mock import patch,AsyncMock,Mock
   import main
   hit=detect.analyze(TEXT,'fdny')
   with patch.object(main,'geocode_verify',new_callable=AsyncMock,return_value=(False,False,'',None,None,'')),patch.object(main,'_box_lookup',new_callable=AsyncMock,return_value=[]),patch.object(main,'ops_log'),patch.object(main,'_intersection_point',new_callable=AsyncMock,return_value=(None,None)),patch.object(main,'_map_street_names',new_callable=AsyncMock,return_value=set()),patch.object(main.alert_waha,'send_text',new_callable=AsyncMock) as send:
    result=await main.verify_and_send('fdny',hit,Mock())
-   self.assertEqual(result,'suppressed');send.assert_not_awaited()
+   self.assertEqual(result,'sent');send.assert_awaited_once()
  async def test_rejected_incident_visible(self):
   from unittest.mock import patch,Mock
   from pathlib import Path

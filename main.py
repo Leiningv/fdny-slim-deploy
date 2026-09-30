@@ -1390,6 +1390,12 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     Returns 'sent' | 'queued' | 'suppressed'."""
     now = time.time()
     verify_started = time.monotonic()
+    from highway_area import spoken_area
+    source_text = (source_call or {}).get("transcription") or hit.get("excerpt") or ""
+    area = spoken_area(source_text) if profile == "fdny" else ""
+    highway_area_exception = bool(area and hit.get("spoken_highway_area") == area and
+                                  hit["address"].startswith(area + ", "))
+
     if profile == "fdny":
         import fdny_audio_gate
         source_text = (source_call or {}).get("transcription") or hit.get("excerpt") or ""
@@ -1453,7 +1459,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["box_only"] = False
         stats.event(profile, "map supplied road type for explicit spoken house: " + canonical)
     box_task = None
-    if profile == "fdny":
+    if profile == "fdny" and not highway_area_exception:
         heard = hit.get("box_heard") or _heard_box(hit.get("excerpt") or "")
         if heard:
             box_task = asyncio.create_task(_box_lookup(heard))
@@ -1465,6 +1471,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         # usually slower, so the text post is not delayed.
         ogg_task = asyncio.create_task(asyncio.to_thread(_ensure_ogg, clip_name))
     verified = True
+    if highway_area_exception:
+        stats.event(profile, "spoken highway area accepted under owner no-map rule; no precise pin")
     verified_label = ""
     lat = lon = None
     locality = ""
@@ -1558,7 +1566,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     if hit.get("directional_numbered_corner") and hit.get("area_defaulted"):
         hit["hold_reason"]="directional corner borough unresolved"
         return "suppressed"
-    if GEOCODE_VERIFY and not hit.get("box_only"):
+    if GEOCODE_VERIFY and not hit.get("box_only") and not highway_area_exception:
         location_check_started = time.monotonic()
         # Intersections require BOTH spoken roads at one point. The ordinary
         # geocoder can otherwise certify the first street only.
@@ -1624,7 +1632,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             return "suppressed"
         if not verified:
             stats.event(profile, f"unconfirmed address: {hit['address']}")
-    if profile == "fdny" and verified and GEOCODE_VERIFY:
+    if profile == "fdny" and verified and GEOCODE_VERIFY and not highway_area_exception:
         from fdny_borough_gate import exact_numbered_fdny_match
         if not exact_numbered_fdny_match(hit["address"], verified_label):
             reason = "map did not confirm the exact FDNY house and street"
@@ -1705,7 +1713,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             stats.event(profile, f"suppressed (spoken crossings geometry): {gap_m:.0f}m")
             return "suppressed"
         stats.event(profile, f"two spoken crosses map-verified: {spoken_three}")
-    cross = (hit.get("cross") or "").strip()
+    cross = "" if highway_area_exception else (hit.get("cross") or "").strip()
     if direct_candidate and not direct_pair_verified and verified:
         # A typed independently heard cross may be printed after a shared
         # junction proof even when address rewrite is not appropriate.
@@ -2039,7 +2047,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         ops_log(f"Held: Heard {hit['address']}, but could not verify that location for {hit['nature']}.")
         hit["hold_reason"] = reason
         return "suppressed"
-    if profile == "fdny" and GEOCODE_VERIFY:
+    if profile == "fdny" and GEOCODE_VERIFY and not highway_area_exception:
         from fdny_borough_gate import exact_numbered_fdny_match
         if not exact_numbered_fdny_match(hit["address"], verified_label):
             reason = "map did not confirm the exact FDNY house and street"

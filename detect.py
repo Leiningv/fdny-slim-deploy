@@ -1796,6 +1796,10 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         addr = _with_area(spoken_pair, profile, t)
     else:
         addr = extract_dispatch_address(t, profile)
+    from highway_area import spoken_area
+    highway_location = spoken_area(t) if profile == "fdny" else ""
+    if highway_location:
+        addr = _with_area(highway_location, profile, t)
     suffixless = fdny_suffixless_address(t) if profile == "fdny" else ""
     if suffixless:
         addr = _with_area(suffixless, profile, t)
@@ -1857,7 +1861,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     sullivan_route_exit = bool(profile == "sullivan" and re.fullmatch(r"Route \d{1,3}[A-Z]? at Exit \d{1,3}[A-Z]?", street_part, re.I))
     fdny_highway_exit = bool(profile == "fdny" and re.fullmatch(
         r"(?:Gowanus Expwy|Prospect Expwy|BQE|Belt Pkwy) at Exit \d{1,3}[A-Z]?", street_part, re.I))
-    if not fdny_highway_exit and not suffixless and not box_only and not metrotech_house and not fdny_numbered_broadway and not sullivan_numbered_broadway and not sullivan_route_exit and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
+    if not highway_location and not fdny_highway_exit and not suffixless and not box_only and not metrotech_house and not fdny_numbered_broadway and not sullivan_numbered_broadway and not sullivan_route_exit and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
             and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
         logging.info("suppressed (no street type): %s", addr)
         return None
@@ -1982,7 +1986,10 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         letters = re.search(r"\bAvenue\s+([A-Z])\s+[A-Za-z]+\s*[,;]\s*Avenue\s+([A-Z])\s+[A-Za-z]+\b", text)
         if letters and letters.group(1)!=letters.group(2):
             cross=f"Avenue {letters.group(1)} & Avenue {letters.group(2)}"
+    if highway_location:
+        cross = ""  # Area/exit road is already on the location line, not a C/s.
     return {
+        "spoken_highway_area": highway_location,
         "spoken_time": spoken_time,
         "source": source,
         "nature": nature,
