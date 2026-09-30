@@ -1493,6 +1493,10 @@ def extract_apartment(text: str) -> str:
     ('apartment 1 Robert' = 1R). 'unit N' is apparatus, not an apartment -
     only 'apartment/apt' count."""
     t = _norm(text).lower()
+    # ASR punctuation is a separator, not part of a spoken apartment ID.
+    # Stay inside the explicit apartment phrase and existing phonetic map.
+    t = re.sub(r"(\b(?:apartment|apt)s?)\s*,\s*", r"\1 ", t)
+    t = re.sub(r"(\b(?:apartment|apt)s?\s+\d{1,3})\s*,\s*", r"\1 ", t)
     m = re.search(r"\b(?:apartment|apt)s?\s+(\d{1,3})\s+([a-z][a-z\-]+)\b", t)
     if m and m.group(2) in _PHONETIC:
         return "Apartment " + m.group(1) + _PHONETIC[m.group(2)]
