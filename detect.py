@@ -1209,6 +1209,10 @@ def get_nature(text: str, profile: str = "") -> str:
                             r"(?:private dwelling|multiple dwelling)\b", t)
         if m_smoke:
             return _addr_title(m_smoke.group(0))
+    if profile == "fdny" and not _negative_fire_context(t):
+        rear = re.search(r"\bfire\s+in\s+the\s+rear\b(?:\s*[,;]?\s*(?:of\s+a\s+)?(?:private|multiple)\s+dwelling\b)?", t)
+        if rear:
+            return _addr_title(rear.group(0))
     # A concrete FDNY complaint is more informative than its transmission
     # type. Capture a bounded spoken phrase after "reporting"/"for" rather
     # than a bare fire/smoke word elsewhere in a multi-job transcript.
@@ -1909,6 +1913,30 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
             num=int(directional.group(2))
             suffix="th" if 11 <= num % 100 <= 13 else {1:"st",2:"nd",3:"rd"}.get(num%10,"th")
             cross=f"{directional.group(1).title()} {num}{suffix} Street"
+    if profile == "hatzolah":
+        corridor = re.search(r"\b([A-Za-z][A-Za-z ]+?)\s+(?:Avenue|Ave)\s+(?:off(?: of)?|and|at)\s+([A-Za-z]+)(?:\s+(?:Avenue|Ave))?.*?\b\1\s+between\s+([A-Za-z]+)\s+and\s+([A-Za-z]+)", text, re.I)
+        if corridor:
+            primary=corridor.group(1).strip().split()[-1]
+            if corridor.group(2).lower() in (corridor.group(3).lower(),corridor.group(4).lower()):
+                addr=f"{primary.title()} Avenue, {get_hatzolah_area(t)}, NY"
+                cross=f"{corridor.group(3).title()} Avenue & {corridor.group(4).title()} Avenue"
+                direct_pair=None
+        # Spoken numbered block after a numbered street inherits Avenue only
+        # as a candidate; both real crossing roads must verify before print.
+        block = re.search(r"\bbetween\s+(\d{1,2})\s+and\s+(\d{1,2})\b", text, re.I)
+        if not cross and block and re.match(r"^\d+\s+\d+(?:st|nd|rd|th)\s+(?:Street|St)\b", addr, re.I):
+            def ordinal(n):
+                n=int(n);return str(n)+("th" if 11<=n%100<=13 else {1:"st",2:"nd",3:"rd"}.get(n%10,"th"))
+            if block.group(1)!=block.group(2):
+                cross=f"{ordinal(block.group(1))} Avenue & {ordinal(block.group(2))} Avenue"
+                inherited_numbered_cross=True
+            else:inherited_numbered_cross=False
+        else:inherited_numbered_cross=False
+    else:inherited_numbered_cross=False
+    if profile == "fdny" and not cross:
+        letters = re.search(r"\bAvenue\s+([A-Z])\s+[A-Za-z]+\s*[,;]\s*Avenue\s+([A-Z])\s+[A-Za-z]+\b", text)
+        if letters and letters.group(1)!=letters.group(2):
+            cross=f"Avenue {letters.group(1)} & Avenue {letters.group(2)}"
     return {
         "spoken_time": spoken_time,
         "source": source,
@@ -1946,6 +1974,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
             if re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I) else ""),
         "priority": is_priority(t),
         "cross": cross,
+        "inherited_numbered_cross": inherited_numbered_cross,
         "single_spoken_cross": (
             re.search(r"\b(?:that'?s\s+)?at\s+((?:East|West|North|South|E|W|N|S)\s+"
                       r"\d{1,3}(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", t, re.I).group(1)

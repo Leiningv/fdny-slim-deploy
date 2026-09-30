@@ -1651,6 +1651,19 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             stats.event(profile, f"spoken intersection map-verified: {hit['address']}")
         else:
             stats.event(profile, f"spoken second street unverified: {direct_candidate}")
+    if hit.get("inherited_numbered_cross"):
+        if not verified:
+            hit["cross"] = ""
+        else:
+            import spoken_cross as crossmap
+            base_road = re.sub(r"^\d+\s+", "", hit["address"].split(",")[0])
+            try:
+                valid = await asyncio.gather(*(asyncio.wait_for(
+                    crossmap.verify(base_road,side.strip(),lat,lon),timeout=10)
+                    for side in (hit.get("cross") or "").split("&")))
+            except Exception:
+                valid = [False]
+            if not all(valid): hit["cross"] = ""
     spoken_three = (hit.get("spoken_three_road_crosses") or "").strip()
     if spoken_three:
         # Both crossing roads were said after the primary road. Verify each
@@ -1683,6 +1696,15 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             return "suppressed"
         stats.event(profile, f"two spoken crosses map-verified: {spoken_three}")
     cross = (hit.get("cross") or "").strip()
+    if direct_candidate and not direct_pair_verified and verified:
+        # A typed independently heard cross may be printed after a shared
+        # junction proof even when address rewrite is not appropriate.
+        point = (None,None)
+        try:
+            point = await asyncio.wait_for(_intersection_point(hit["address"], direct_candidate),timeout=9)
+        except Exception: pass
+        if point[0] is not None: cross=direct_candidate
+
     # A single directly spoken FDNY cross is never invented from a box row.
     # Only keep it beside the selected box after a real road intersection
     # independently verifies; failure leaves the box alone.
@@ -2137,7 +2159,7 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         r"collision|rollover|entrap)\w*\b", nature, re.I)
     icon = "\N{AMBULANCE}" if medical else "\N{FIRE}"
     lines = [f"*{icon} {nature}*", "", addr_line]
-    if (hit.get("source") or "").removeprefix("zello-") in ("hatzalah", "hatzolah") and hit.get("patient_age"):
+    if (hit.get("source") or "").removeprefix("zello-") in ("hatzalah", "hatzolah") and hit.get("patient_age") and hit["patient_age"].lower() not in nature.lower():
         lines.append(hit["patient_age"])
     if is_sullivan and hit.get("verified_area"):
         lines.append(f"*{hit['verified_area'].upper()}*")

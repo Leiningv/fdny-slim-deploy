@@ -16,7 +16,7 @@ _FALLBACK = re.compile(r"^(?:phone alarm|automatic alarm|fire alarm|alarm activa
 _SPECIFIC_FIRE = re.compile(
     r"\b(?:[a-z]{3,18}\s+fire|fire\s+(?:in|on|at)\s+(?:the\s+|an?\s+)?"
     r"(?:[a-z]{3,18}\s+){0,3}(?:building|dwelling|floor|apartment|balcony|"
-    r"basement|cellar|hallway))\b", re.I)
+    r"basement|cellar|hallway|rear))\b", re.I)
 _NEGATED = re.compile(r"\b(?:no|not|without|negative)\s+(?:\w+\s+){0,2}$", re.I)
 
 
