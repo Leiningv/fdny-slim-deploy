@@ -16,7 +16,8 @@ _LOCAL_JOB = re.compile(
 _ADDRESS_SUFFIX = re.compile(
     rf"\b\d{{1,5}}\s+[A-Za-z][A-Za-z' -]*?\s+"
     rf"(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Place|Pl|Boulevard|Blvd)"
-    rf"\s*,\s*(?P<borough>{_OTHER_BOROUGH})\b",
+    rf"\s*,\s*(?P<borough>{_OTHER_BOROUGH})\b"
+    rf"(?!\s+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Place|Pl|Boulevard|Blvd))",
     re.I,
 )
 

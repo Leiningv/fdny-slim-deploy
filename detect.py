@@ -88,6 +88,10 @@ def get_hatzolah_area(text: str) -> str:
     t = text.lower()
     if re.search(r"\b(?:west\s*side|manhattan)\b",t) and not re.search(r"\bmanhattan beach\b",t):
         return "Manhattan"
+    # This complete spoken Beach-number/Rockaway pair is a Queens location,
+    # never Brooklyn's default. Sender still verifies both roads together.
+    if re.search(r"\bRockaway Beach (?:Boulevard|Blvd)\s+(?:and|at|&)\s+Beach\s+\d{1,3}(?:st|nd|rd|th)?\b", t, re.I):
+        return "Queens"
     # Explicitly excluded Rockland locations cannot inherit Brooklyn's
     # default area. The final coverage gate suppresses these.
     if re.search(r"\b(?:rockland|monsey|spring valley|new square|suffern|haverstraw|garnerville|airmont|chestnut ridge)\b", t):
@@ -965,6 +969,11 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
             w2 = (hn.group(2) or "").split()
             while w2 and w2[0] in _NAME_STOP:
                 w2.pop(0)
+            # Primary typed road ends at its first spoken type. A following
+            # cross (Grand Street Manhattan Avenue) cannot join the name.
+            for k,w in enumerate(w2):
+                if w in ("street","st","avenue","ave","road","rd","drive","dr","place","pl","boulevard","blvd"):
+                    return _with_area(f"{hn.group(1)} {_addr_title(' '.join(w2[:k+1]))}", profile, text)
             nm = " ".join(w2)
             ordw = hn.group(3) or ""
             if (nm and nm not in _NAME_STOP) or ordw:
@@ -1160,6 +1169,8 @@ def get_nature(text: str, profile: str = "") -> str:
     if v and re.search(r"\b(?:patient|male|female|elderly|sick person|"
                        r"year[- ]old|child|adult)\b", t):
         return v
+    if profile == "sullivan" and re.search(r"\b(?:female|male|patient|person)\b.{0,25}\bmental health\b", t) and not re.search(r"\b(?:no|not|negative)\s+mental health\b", t):
+        return "Mental Health"  # spoken complaint only, no diagnosis added
     v = vt(r"\bchest pain\b")
     if v: return v
     v = vt(r"\bdrown\w*\b")
@@ -1593,6 +1604,12 @@ def _hatzalah_dispatch_corner(text: str):
     A bare second road remains a candidate, never a claimed full road name;
     the sender must map-check both sides before publishing the intersection.
     """
+    beach = re.search(r"\b(Rockaway Beach (?:Boulevard|Blvd))\s+(?:and|at|&)\s+(Beach\s+\d{1,3}(?:st|nd|rd|th)?)(?:\s+(?:Street|St))?\b", text, re.I)
+    if beach:
+        return _addr_title(beach[1]), _addr_title(beach[2])
+    bare = re.search(r"\b(?:to|at|on)\s+(Kingston)\s+and\s+(Montgomery)\b", text, re.I)
+    if bare:
+        return bare[1].title(), bare[2].title()
     road = r"[A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2}\s+(?:Parkway|Pkwy|Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd)"
     m = re.search(r"\b("+road+r")\s+(?:and|&)\s+"
                   r"([A-Za-z][A-Za-z'-]*(?:\s+(?:Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd))?)\b", text, re.I)
@@ -1790,7 +1807,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         # standalone first road. Named roads stay conservative: map-check
         # the second as a candidate downstream.
         numbered_grid = extract_cross_street(t) if profile == "hatzolah" else None
-        addr = _with_area(numbered_grid or direct_pair[0], profile, t)
+        bare_named_pair = bool(profile == "hatzolah" and direct_pair == ("Kingston", "Montgomery"))
+        addr = _with_area(numbered_grid or (" & ".join(direct_pair) if bare_named_pair else direct_pair[0]), profile, t)
     elif spoken_pair and "&" in spoken_pair and re.search(
             r"\b(?:for|at|on|of|in)\s+", t, re.I):
         addr = _with_area(spoken_pair, profile, t)
@@ -1986,6 +2004,9 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         letters = re.search(r"\bAvenue\s+([A-Z])\s+[A-Za-z]+\s*[,;]\s*Avenue\s+([A-Z])\s+[A-Za-z]+\b", text)
         if letters and letters.group(1)!=letters.group(2):
             cross=f"Avenue {letters.group(1)} & Avenue {letters.group(2)}"
+    if profile == "hatzolah" and direct_pair == ("Kingston", "Montgomery"):
+        direct_pair = None  # pair is already the location, verified as a whole
+        cross = ""
     if highway_location:
         cross = ""  # Area/exit road is already on the location line, not a C/s.
     return {
