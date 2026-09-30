@@ -1414,45 +1414,14 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["hold_reason"] = "Rockland dispatch"
         return "suppressed"
     if profile.lower().removeprefix("zello-") in ("hatzolah", "hatzalah") and hit.get("area_defaulted"):
-        import locality_gate
-        # A bare NYC pair can name an exact point even if the borough was
-        # omitted. Prove both full road names at the same map node, and
-        # independently reverse-check the point's borough before using it.
-        pair_safe = False
-        bare_first = hit["address"].split(",", 1)[0]
-        candidate = hit.get("direct_cross_candidate") or ""
-        if candidate and not re.match(r"^\d+\s", bare_first) and bare_first.lower().endswith(
-                ("street", "avenue", "road", "boulevard", "drive", "place", "lane")):
-            try:
-                point = await asyncio.wait_for(
-                    _intersection_point(hit["address"], candidate), timeout=9)
-            except Exception:
-                point = (None, None)
-            if point[0] is not None:
-                try:
-                    import aiohttp
-                    async with aiohttp.ClientSession() as ses:
-                        async with ses.get("https://nominatim.openstreetmap.org/reverse",
-                                           params={"lat": point[0], "lon": point[1],
-                                                   "format": "json", "addressdetails": 1},
-                                           headers={"User-Agent": "fdny-slim/1.0 (dispatch monitor)"},
-                                           timeout=aiohttp.ClientTimeout(total=6)) as rsp:
-                            body = await rsp.json() if rsp.status == 200 else {}
-                    area = body.get("address") or {}
-                    pair_safe = area.get("city_district") == "Kings County" and area.get("state") == "New York"
-                except Exception:
-                    pair_safe = False
-        grid_point = None
-        if not pair_safe:
-            grid_point = await _hatzalah_brooklyn_grid_corridor(hit)
+        # Hatzalah dispatches normally give an address without a borough.
+        # The owner explicitly removed the spoken-area requirement. Keep
+        # the two-junction corridor verifier, then use the normal exact
+        # address/intersection and coverage checks below for every other
+        # candidate. Missing borough words alone must never hold a job.
+        grid_point = await _hatzalah_brooklyn_grid_corridor(hit)
         if grid_point is not None:
             hit["verified_brooklyn_grid_point"] = grid_point
-            pair_safe = True
-        if not pair_safe and not await locality_gate.default_area_safe(hit, hit.get("excerpt") or ""):
-            stats.event(profile, f"suppressed (ambiguous default borough): {hit['address']}")
-            ops_log(f"suppressed (ambiguous default borough): {hit['address']}")
-            hit["hold_reason"] = "ambiguous default borough"
-            return "suppressed"
     if profile == "fdny" and re.search(r"\b\d+(?:st|nd|rd|th)\s+Walk,", hit["address"], re.I):
         # A reused overlapping clip may contain a separate numbered street
         # job and a box for THAT job, then repeat a Walk address. Never tie

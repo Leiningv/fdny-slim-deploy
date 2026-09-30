@@ -5,7 +5,7 @@ import detect
 import main
 
 class NewCandidateGates(unittest.IsolatedAsyncioTestCase):
-    async def test_hatzalah_bare_grid_without_borough_or_map_stays_held(self):
+    async def test_hatzalah_bare_grid_without_map_stays_held(self):
         hit = detect.analyze('Hatzolah units respond, 14 and 46, child not breathing', 'zello-hatzalah')
         self.assertEqual(hit['address'], '14th Ave & 46th St, Brooklyn, NY')
         with (patch.object(main, '_intersection_point', new_callable=AsyncMock, return_value=(None,None)),
@@ -16,7 +16,7 @@ class NewCandidateGates(unittest.IsolatedAsyncioTestCase):
               patch.object(main, 'ops_log')):
             outcome = await main.verify_and_send('zello-hatzalah', hit, Mock())
         self.assertEqual(outcome, 'suppressed')
-        self.assertEqual(hit['hold_reason'], 'ambiguous default borough')
+        self.assertEqual(hit['hold_reason'], 'no verified location')
         send.assert_not_awaited()
 
     async def test_sullivan_route_exit_without_verified_county_stays_held(self):
