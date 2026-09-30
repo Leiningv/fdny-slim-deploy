@@ -65,9 +65,8 @@ class InheritedVerification(unittest.IsolatedAsyncioTestCase):
               patch.object(main,'_map_street_names',new_callable=AsyncMock,return_value=set()),
               patch.object(main.control,'muted_feeds',return_value=set()),patch.object(main,'_load_recent',return_value=[]),patch.object(main,'_save_recent'),patch.object(main,'ops_log'),
               patch.object(main.alert_waha,'send_text',new_callable=AsyncMock,return_value=True) as send):
-            self.assertEqual(await main.verify_and_send('zello-hatzalah',h,Mock()),'sent')
-        text=send.await_args.args[0]
-        if valid:self.assertIn('C/s 15th Avenue & 16th Avenue',text)
-        else:self.assertNotIn('C/s',text)
+            self.assertEqual(await main.verify_and_send('zello-hatzalah',h,Mock()),'sent' if valid else 'suppressed')
+        if valid:self.assertIn('C/s 15th Avenue & 16th Avenue',send.await_args.args[0])
+        else:send.assert_not_awaited()
     async def test_real_crosses_print(self):await self.check(True)
-    async def test_unproven_crosses_omitted(self):await self.check(False)
+    async def test_unproven_crosses_hold(self):await self.check(False)

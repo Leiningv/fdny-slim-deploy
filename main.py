@@ -1400,6 +1400,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["hold_reason"] = "Hatzalah distinct UWS/Broadway request; complaint/address pairing unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
+    if hit.get("spoken_between_crosses_required") and not hit.get("cross") and " between " not in hit.get("address", "").lower():
+        hit["hold_reason"] = "spoken between crosses lost during extraction"
+        stats.event(profile, "Held: " + hit["hold_reason"])
+        return "suppressed"
     # Owner-requested future-only nature exclusion. Keep the candidate and
     # recording in held history; never clear its label and send a blank post.
     if re.match(r"^automatic alarm(?:\s*,|$)", (hit.get("nature") or "").strip(), re.I):
@@ -1708,6 +1712,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             except Exception:
                 valid = [False]
             if not all(valid): hit["cross"] = ""
+    if hit.get("spoken_between_crosses_required") and hit.get("inherited_numbered_cross") and not hit.get("cross"):
+        hit["hold_reason"] = "spoken between crosses unverified"
+        stats.event(profile, "Held: " + hit["hold_reason"])
+        return "suppressed"
     spoken_three = (hit.get("spoken_three_road_crosses") or "").strip()
     if spoken_three:
         # Both crossing roads were said after the primary road. Verify each

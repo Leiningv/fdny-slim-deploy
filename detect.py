@@ -517,7 +517,10 @@ def extract_audio_crosses(text: str) -> str | None:
         r = _pair(m.group(1), m.group(2))
         if r:
             return r
-    m = re.search(rf"\bbetween\s+({_BARE})\s+and\s+({_BARE})\b", t, re.I)
+    bare_block_text = t
+    if re.search(rf"\b{_ANCH}\s+between\b", t, re.I):
+        bare_block_text = re.split(r"\b(?:for|reporting)\b", t[t.lower().find("between"):], maxsplit=1, flags=re.I)[0]
+    m = re.search(rf"\bbetween\s+({_BARE})\s+and\s+({_BARE})\b", bare_block_text, re.I)
     if m:
         a, b = m.group(1).strip(), m.group(2).strip()
         if all(re.fullmatch(r"[A-Za-z][A-Za-z.'-]{2,}", w)
@@ -1962,10 +1965,18 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
             r"\b\d{1,5}\s+(?:[A-Za-z][A-Za-z'-]*\s+){1,3}"
             r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|"
             r"Place|Pl|Lane|Ln)\s+between\b", t, re.I)
+    unnumbered_before_cross = None
+    if profile == "hatzolah" and spoken_pair:
+        unnumbered_before_cross = re.search(
+            r"\b([A-Z][a-zA-Z'-]*(?:\s+[A-Z][a-zA-Z'-]*){0,2}\s+"
+            r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln))\s+between\b", t)
     if terminal_street:
         addr = _with_area(terminal_street, profile, t)
     elif numbered_before_cross:
         addr = extract_dispatch_address(t, profile)
+    elif unnumbered_before_cross:
+        addr = _with_area(unnumbered_before_cross.group(1), profile, t)
+        direct_pair = None
     elif direct_pair:
         # Explicit two-number grid is one intersection, not an arbitrary
         # standalone first road. Named roads stay conservative: map-check
@@ -2229,7 +2240,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
             if profile == "fdny" and re.search(r"\b(?:that'?s\s+)?at\s+((?:East|West|North|South|E|W|N|S)\s+"
                       r"\d{1,3}(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", t, re.I) else ""),
         "direct_cross_candidate": direct_pair[1] if direct_pair and not three_roads else "",
-        "spoken_three_road_crosses": f"{three_roads[1]} & {three_roads[2]}" if three_roads else "",
+        "spoken_three_road_crosses": f"{three_roads[1]} & {three_roads[2]}" if three_roads else (cross or "") if profile == "hatzolah" and (unnumbered_before_cross or numbered_before_cross) and not inherited_numbered_cross else "",
+        "spoken_between_crosses_required": bool(profile == "hatzolah" and re.search(r"\b(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln)\s+between\b", t, re.I) ),
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
