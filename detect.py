@@ -1855,7 +1855,9 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     sullivan_numbered_broadway = bool(profile == "sullivan" and re.fullmatch(
         r"\d{1,5}\s+(?:(?:East|West)\s+)?Broadway", street_part, re.I))
     sullivan_route_exit = bool(profile == "sullivan" and re.fullmatch(r"Route \d{1,3}[A-Z]? at Exit \d{1,3}[A-Z]?", street_part, re.I))
-    if not suffixless and not box_only and not metrotech_house and not fdny_numbered_broadway and not sullivan_numbered_broadway and not sullivan_route_exit and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
+    fdny_highway_exit = bool(profile == "fdny" and re.fullmatch(
+        r"(?:Gowanus Expwy|Prospect Expwy|BQE|Belt Pkwy) at Exit \d{1,3}[A-Z]?", street_part, re.I))
+    if not fdny_highway_exit and not suffixless and not box_only and not metrotech_house and not fdny_numbered_broadway and not sullivan_numbered_broadway and not sullivan_route_exit and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
             and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
         logging.info("suppressed (no street type): %s", addr)
         return None
@@ -1887,6 +1889,15 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         parts = [p for p in parts if _canon_street(p) != addr_core]
         cross = " & ".join(parts) if parts else None
     nature = get_nature(t, profile)
+    if fdny_highway_exit:
+        # Spoken direction is a qualifier, not a geocoding substitute.
+        direction = re.search(r"\b(westbound|eastbound|northbound|southbound)\b", t, re.I)
+        if direction and nature:
+            nature += ", " + direction.group(1).title()
+        # Keep the spoken exit road only; never add a map neighbor as C/s.
+        exit_road = re.search(r"\bExit\s+\d{1,3}[A-Z]?\s*[,;]\s*(\d{1,3})(?:st|nd|rd|th)?\s+(Street|St)\b", t, re.I)
+        if exit_road:
+            cross = exit_road.group(1) + " Street"
     if profile == "hatzolah" and nature and re.search(r"^\d{1,5}\s+", addr):
         # A separate later complaint with no matching full address cannot
         # inherit the first dispatch's house simply by sharing one ASR chunk.

@@ -3037,6 +3037,16 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             text = second
             hit["audio_reviewed"] = True
     if not hit:
+        # A spoken complaint rejected by parsing must remain visible. Chatter
+        # still skips quietly, but no incident is allowed to disappear merely
+        # because an address-quality gate could not form a safe candidate.
+        nature = detect.get_nature(text, "fdny") if text else ""
+        address = detect.extract_dispatch_address(text, "fdny") if text else ""
+        if nature and address:
+            why = "Spoken complaint/location rejected by parser; no verified incident"
+            stats.mark_alert("fdny", nature, address, False, failed=False,
+                             outcome="suppressed", voice_url=(f"{os.environ.get('RENDER_EXTERNAL_URL', 'https://fdny-slim.onrender.com')}/audio/{clip_name}" if clip_name else ""), reason=why)
+            stats.event("fdny", "Held: " + why)
         _fdny_call_record(call, text, clip_name, None, "skipped", "no parsed incident")
         return
     key = f"fdny|{hit['nature']}|{hit['address']}"
