@@ -1095,6 +1095,16 @@ def get_nature(text: str, profile: str = "") -> str:
         alarm = re.search(r"\bautomatic\s+(?:fire\s+)?alarm(?:\s+in\s+(?:an?\s+)?(?:office\s+building|private\s+dwelling))?\b", t)
         if alarm and not re.search(r"\b(?:structure|building|house|kitchen|car|vehicle|actual)\s+fire\b|\bfire\s+in\s+a\s+private\s+dwelling\b", t[alarm.end():]):
             return _addr_title(alarm.group(0))
+    # Preserve only adjacent, explicit compound complaints from one readout.
+    compounds = []
+    if profile == "sullivan":
+        compounds.append(r"\b(?:difficulty breathing\s*[,;]?\s*(?:and\s+)?altered mental status|altered mental status\s*[,;]?\s*(?:and\s+)?difficulty breathing)\b")
+    if profile == "fdny":
+        compounds.append(r"\bflash fire with (?:a )?gas leak\b")
+    for pattern in compounds:
+        for m in re.finditer(pattern, t):
+            if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$", t[max(0,m.start()-35):m.start()]):
+                return _addr_title(m.group(0))
     # Preserve a spoken age with its medical complaint, never invent one.
     aged = re.search(r"\b(?:the\s+)?(\d{1,3}[- ]year[- ]old)\s+(?:patient\s+)?(not\s+feeling\s+well|feeling\s+unwell|feels\s+unwell)\b", t)
     if aged:
