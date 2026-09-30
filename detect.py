@@ -870,6 +870,18 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
                 r"\b(?:box|terminal|class)\s*$", text[max(0, letter_avenue.start()-12):letter_avenue.start()], re.I):
             return _with_area(f"{letter_avenue.group(1)} Avenue {letter_avenue.group(3)}",
                               profile, text)
+        # Class 3 box and terminal readout before a separate Broadway house.
+        # Broadway has no road suffix, so the generic typed-street parser
+        # otherwise promotes the later Linden Street cross to the address.
+        # Require the full dispatch shape; a naked terminal number is not a
+        # house, and the sender still verifies the exact house independently.
+        class_broadway = re.search(
+            r"\b(?:AFA\s+)?class\s*3\s+(?:box\s+)?\d{2,4}\s*[,;]?\s*"
+            r"terminal\s+\d{1,3}\s*[,;]?\s*"
+            r"(\d{1,5})\s+((?:East|West)\s+)?Broadway\b", text, re.I)
+        if class_broadway:
+            road = (class_broadway.group(2) or "") + "Broadway"
+            return _with_area(f"{class_broadway.group(1)} {_addr_title(road)}", profile, text)
         # A spoken alarm/box ID followed by a separate numbered East/West
         # street still has a house address. Do not turn the alarm ID into
         # the house or let a later apartment numeral replace the house.
@@ -1705,10 +1717,12 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         logging.info("suppressed (type-only address): %s", addr)
         return None
     metrotech_house = bool(profile == "fdny" and re.fullmatch(r"\d{1,3} MetroTech Center", street_part, re.I))
+    fdny_numbered_broadway = bool(profile == "fdny" and re.fullmatch(
+        r"\d{1,5}\s+(?:(?:East|West)\s+)?Broadway", street_part, re.I))
     sullivan_numbered_broadway = bool(profile == "sullivan" and re.fullmatch(
         r"\d{1,5}\s+(?:(?:East|West)\s+)?Broadway", street_part, re.I))
     sullivan_route_exit = bool(profile == "sullivan" and re.fullmatch(r"Route \d{1,3}[A-Z]? at Exit \d{1,3}[A-Z]?", street_part, re.I))
-    if not box_only and not metrotech_house and not sullivan_numbered_broadway and not sullivan_route_exit and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
+    if not box_only and not metrotech_house and not fdny_numbered_broadway and not sullivan_numbered_broadway and not sullivan_route_exit and not re.search(_T_ANY + r"|\bwalk\b", street_part, re.I) \
             and (re.search(r"\d", street_part) or re.match(r"^the\s", street_part, re.I)):
         logging.info("suppressed (no street type): %s", addr)
         return None
@@ -1816,10 +1830,13 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         # 280 chars - a late-spoken 'box NNNN' was missed and fell through
         # to the closest-box lookup)
         "box_heard": box_heard,
-        "class3_house_address": bool(profile == "fdny" and re.search(
+        "class3_house_address": bool(profile == "fdny" and (
+            re.search(r"\b(?:AFA\s+)?class\s*3\s+(?:box\s+)?\d{2,4}\s*[,;]?\s*"
+                      r"terminal\s+\d{1,3}\s*[,;]?\s*\d{1,5}\s+"
+                      r"(?:(?:East|West)\s+)?Broadway\b", t, re.I) or re.search(
             r"\b(?:AFA\s+)?class\s*3\s*\d{4}\s*[,;]?\s*"
             r"\d{1,5}\s+(?:East|West|North|South)\s+\d{1,3}"
-            r"(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave)\b", t, re.I)),
+            r"(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave)\b", t, re.I))),
         "box_glue_ambiguous": box_glue_ambiguous,
         "raw_box_run": "" if box_only or terminal_street else (
             re.search(r"\bbox\s+(\d{5,7})\b", _norm(text), re.I).group(1)
