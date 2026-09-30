@@ -990,6 +990,19 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         if named:
             return _with_area(named, profile, text)
     else:
+        # Sullivan dispatch can pair a typed road with suffixless Broadway.
+        # Require the explicit spoken separator, never supply a road suffix.
+        if profile == "sullivan":
+            broadway_pair = re.search(
+                r"\b([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})\s+"
+                r"(street|st|avenue|ave|road|rd|drive|dr|place|pl)\s+"
+                r"(?:and|at|&)\s+((?:(?:east|west)\s+)?broadway)\b", text, re.I)
+            if broadway_pair:
+                first = broadway_pair.group(1).split()
+                while len(first) > 1 and first[0].lower() in _NAME_STOP:
+                    first.pop(0)
+                typ = {"st": "Street", "ave": "Avenue", "rd": "Road", "dr": "Drive", "pl": "Place"}.get(broadway_pair.group(2).lower(), broadway_pair.group(2).title())
+                return _with_area(f"{_addr_title(' '.join(first))} {typ} & {_addr_title(broadway_pair.group(3))}", profile, text)
         # Broadway has no Street/Road suffix. Keep its spoken house only in
         # a Sullivan medical dispatch; the sender still verifies exact house,
         # road and county before any outgoing alert.
@@ -1285,6 +1298,10 @@ def get_nature(text: str, profile: str = "") -> str:
         truck = re.search(r"\b(?:for|reporting)\s+(fire\s+in\s+(?:a\s+)?(?:sanitation\s+)?truck)\b", t)
         if truck and not re.search(r"\b(?:test|training|drill)\b", t):
             return _addr_title(truck.group(1))
+        reversed_truck = re.search(r"\b(?:for|reporting)\s+(?:a\s+)?"
+                                   r"((?:sanitation\s+)?truck\s+on\s+fire)\b", t)
+        if reversed_truck and not re.search(r"\b(?:test|training|drill)\b", t):
+            return _addr_title(reversed_truck.group(1))
         vehicle_fire = re.search(r"\b(?:truck|car|vehicle)\s+fire\b", t)
         if vehicle_fire:
             return _addr_title(vehicle_fire.group(0))
