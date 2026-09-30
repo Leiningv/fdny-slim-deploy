@@ -1096,6 +1096,13 @@ def get_nature(text: str, profile: str = "") -> str:
         if alarm and not re.search(r"\b(?:structure|building|house|kitchen|car|vehicle|actual)\s+fire\b|\bfire\s+in\s+a\s+private\s+dwelling\b", t[alarm.end():]):
             return _addr_title(alarm.group(0))
     if profile == "sullivan":
+        # Keep explicit high-rate symptoms and adjacent generally-ill readout.
+        # No diagnosis is inferred from a pulse rate alone.
+        for m in re.finditer(r"\b(?:generally ill\s*[,;]?\s*(?:and\s+)?high (?:heart|pulse) rate|high (?:heart|pulse) rate\s*[,;]?\s*(?:and\s+)?generally ill|high (?:heart|pulse) rate)\b", t):
+            if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$",
+                             t[max(0,m.start()-40):m.start()]):
+                return _addr_title(m.group())
+    if profile == "sullivan":
         # Spoken symptoms only; do not infer shock, hypotension or a diagnosis.
         for m in re.finditer(r"\b(?:low blood pressure\s*[,;]?\s*(?:and\s+)?dehydrated|dehydrated\s*[,;]?\s*(?:and\s+)?low blood pressure|low blood pressure|dehydrated)\b", t):
             if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$",
