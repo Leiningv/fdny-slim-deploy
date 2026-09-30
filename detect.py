@@ -1095,6 +1095,12 @@ def get_nature(text: str, profile: str = "") -> str:
         alarm = re.search(r"\bautomatic\s+(?:fire\s+)?alarm(?:\s+in\s+(?:an?\s+)?(?:office\s+building|private\s+dwelling))?\b", t)
         if alarm and not re.search(r"\b(?:structure|building|house|kitchen|car|vehicle|actual)\s+fire\b|\bfire\s+in\s+a\s+private\s+dwelling\b", t[alarm.end():]):
             return _addr_title(alarm.group(0))
+    if profile == "sullivan":
+        # Spoken symptoms only; do not infer shock, hypotension or a diagnosis.
+        for m in re.finditer(r"\b(?:low blood pressure\s*[,;]?\s*(?:and\s+)?dehydrated|dehydrated\s*[,;]?\s*(?:and\s+)?low blood pressure|low blood pressure|dehydrated)\b", t):
+            if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$",
+                             t[max(0,m.start()-40):m.start()]):
+                return _addr_title(m.group())
     # Preserve only adjacent, explicit compound complaints from one readout.
     compounds = []
     if profile == "sullivan":
