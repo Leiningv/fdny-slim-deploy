@@ -2856,6 +2856,9 @@ def _fdny_call_record(call: dict, transcript: str, clip_name: str | None,
     rotating archive and may cease to exist. A durable remote sink is pending.
     """
     try:
+        if decision == "sent" and hit:
+            import incident_updates
+            incident_updates.register(SEG_DIR, hit, call)
         SEG_DIR.mkdir(parents=True, exist_ok=True)
         row = {"id": str(call.get("id") or call.get("filename") or ""),
                "ts": call.get("ts"), "audio_start_ts": call.get("audio_start_ts"),
@@ -3026,6 +3029,15 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
         _fdny_call_record(call, "", clip_name, None, "skipped", "no transcription")
         stats.event("fdny", "call with no transcription - detect skipped")
         return
+    # Observe update traffic before parse/dedup can discard it. Never send.
+    try:
+        import incident_updates
+        base=os.environ.get("RENDER_EXTERNAL_URL","https://fdny-slim.onrender.com").rstrip("/")
+        update_audit=incident_updates.audit(SEG_DIR,call,text,base+"/audio/"+clip_name if clip_name else "")
+        if update_audit.get("would_post"):
+            stats.event("fdny","10-75 shadow update candidate; not sent")
+    except Exception as exc:
+        logging.warning("FDNY update shadow audit unavailable (%s)",type(exc).__name__)
     if not hit and os.environ.get("FDNY_AUDIO_REVIEW", "0") == "1" and clip_name:
         import audio_review
         second = await _bounded_second_listen(ARCHIVE_DIR / clip_name, "fdny", stats)
