@@ -30,19 +30,29 @@ class ReviewDelivery(unittest.IsolatedAsyncioTestCase):
             await main._post_held_review('fdny', {'hold_reason':'no nature'}, 'clip.wav')
             text.assert_not_awaited()
 
-    async def test_text_and_real_voice_target_ops_only(self):
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d)/'clip.ogg').write_bytes(b'OggS'+b'1'*200)
-            with (patch.dict(main.os.environ, {'HELD_REVIEW_ENABLED':'1'}),
-                  patch.object(main, 'ARCHIVE_DIR', Path(d)),
-                  patch.object(main, '_ensure_ogg', return_value='clip.ogg'),
-                  patch.object(main.alert_waha, '_ops_chat', return_value='ops@g.us'),
-                  patch.object(main.alert_waha, 'send_text', new_callable=AsyncMock,
-                               return_value=True) as text,
-                  patch.object(main.alert_waha, 'send_voice', new_callable=AsyncMock,
-                               return_value=True) as voice):
-                await main._post_held_review('zello-sullivan',
-                    {'address':'Monticello, NY','nature':'','hold_reason':'no nature'}, 'clip.wav')
-                self.assertEqual(text.await_args.kwargs['chat_id'], 'ops@g.us')
-                self.assertEqual(voice.await_args.kwargs['chat_id'], 'ops@g.us')
-                self.assertIn('/audio/clip.ogg', voice.await_args.args[0])
+    async def test_report_only_default_never_sends(self):
+        with (patch.dict(main.os.environ, {'HELD_REVIEW_ROUTE':'report_only'}),
+              patch.object(main.alert_waha, 'send_text', new_callable=AsyncMock) as send):
+            await main._post_held_review('fdny', {'hold_reason':'no nature'}, 'clip.wav')
+            send.assert_not_awaited()
+
+    async def test_owner_dm_compact_line_never_group_or_voice(self):
+        with (patch.dict(main.os.environ, {'HELD_REVIEW_ROUTE':'owner_dm',
+                                          'HELD_REVIEW_OWNER_CHAT_ID':'19293781556@c.us'}),
+              patch.object(main.alert_waha, 'send_text', new_callable=AsyncMock,
+                           return_value=True) as send,
+              patch.object(main.alert_waha, 'send_voice', new_callable=AsyncMock) as voice):
+            await main._post_held_review('fdny', {'hold_reason':'terminal hold',
+                'box_heard':'3413', 'address':'216 Avenue T, Brooklyn, NY',
+                'nature':'Fire in a Private Dwelling','voice_url':'https://example.invalid/recording'}, 'clip.wav')
+            self.assertEqual(send.await_args.kwargs['chat_id'], '19293781556@c.us')
+            self.assertIn('3413', send.await_args.args[0])
+            self.assertIn('https://example.invalid/recording', send.await_args.args[0])
+            voice.assert_not_awaited()
+
+    async def test_group_route_refused(self):
+        with (patch.dict(main.os.environ, {'HELD_REVIEW_ROUTE':'owner_dm',
+                                          'HELD_REVIEW_OWNER_CHAT_ID':'ops@g.us'}),
+              patch.object(main.alert_waha, 'send_text', new_callable=AsyncMock) as send):
+            await main._post_held_review('fdny', {'hold_reason':'terminal hold'}, 'clip.wav')
+            send.assert_not_awaited()

@@ -175,7 +175,8 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.args[3], False)
         self.assertEqual(row.kwargs['outcome'], 'suppressed')
         self.assertIn('numbered building (56 North Oxford Walk)', row.kwargs['reason'])
-        self.assertEqual(row.kwargs['voice_url'], 'https://example.invalid/park.ogg')
+        self.assertIn('/audio/fdny-', row.kwargs['voice_url'])
+        stats.update_alert_recording.assert_called_once()
 
     async def test_cortelyou_numbered_cross_held_with_recording(self):
         import tempfile
@@ -205,7 +206,8 @@ class TestFdnyHandlerHold(unittest.IsolatedAsyncioTestCase):
         row = stats.mark_alert.call_args
         self.assertEqual(row.kwargs['outcome'], 'suppressed')
         self.assertIn('numbered cross street', row.kwargs['reason'])
-        self.assertEqual(row.kwargs['voice_url'], 'https://example.invalid/cortelyou.ogg')
+        self.assertIn('/audio/fdny-', row.kwargs['voice_url'])
+        stats.update_alert_recording.assert_called_once()
 
     async def test_1615_corner_asr_numbered_cross_held_without_send(self):
         import tempfile

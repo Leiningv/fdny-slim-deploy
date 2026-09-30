@@ -551,6 +551,17 @@ def extract_audio_crosses(text: str) -> str | None:
         r = _pair(m.group(1), m.group(2))
         if r:
             return r
+    # Typed crosses after a complete house address; ASR may render "to"
+    # as comma + "the". Require both road types and the address anchor.
+    m = re.search(r"\b\d{1,5}\s+(?:[A-Z][a-z.'-]+\s+){1,3}"
+                  r"(?:Street|St|Avenue|Ave|Road|Rd|Place|Pl)\s*,\s*"
+                  r"([A-Z][a-z.'-]+\s+(?:Street|St|Avenue|Ave|Road|Rd|Place|Pl))"
+                  r"\s*,\s*the\s+"
+                  r"([A-Z][a-z.'-]+\s+(?:Street|St|Avenue|Ave|Road|Rd|Place|Pl))\b", t)
+    if m:
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
     # anchored to anchored: "Glenwood Road to Avenue H"
     m = re.search(rf"({_ANCH})\s+to\s+({_ANCH})\b", t, re.I)
     if m:
@@ -1156,6 +1167,8 @@ def get_nature(text: str, profile: str = "") -> str:
     v = vt(r"\bfire\s+in\s+a\s+private\s+dwelling\b|\bprivate\s+dwelling\s+fire\b")
     if v: return v
     v = vt(r"\b(?:structure|building|house)\s+fire\b")
+    if v: return v
+    v = vt(r"\bfire\s+in\s+the\s+kitchen\s+of\s+(?:a\s+)?restaurant\b")
     if v: return v
     v = vt(r"\bkitchen fire\b|\bstove fire\b")
     if v: return v

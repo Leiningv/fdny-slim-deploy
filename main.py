@@ -1298,30 +1298,25 @@ def _held_review_text(profile: str, hit: dict) -> str:
 
 
 async def _post_held_review(profile: str, hit: dict, clip_name: str | None) -> None:
-    """After owner format approval, send the review and the actual audio to ops."""
-    if os.environ.get("HELD_REVIEW_ENABLED", "0") != "1":
-        return
+    """Owner-only terminal hold notification. Default is saved/report-only."""
     reason = (hit.get("hold_reason") or "").strip()
     if not reason or reason in _REVIEW_SKIP:
         return
-    if not clip_name or not alert_waha._ops_chat():
-        logging.warning("held review has no clip or ops destination: %s", reason)
+    if os.environ.get("HELD_REVIEW_ROUTE", "report_only") != "owner_dm":
+        logging.info("held review saved; notification route=report_only")
         return
-    ogg = await asyncio.to_thread(_ensure_ogg, clip_name)
-    if not ogg or not (ARCHIVE_DIR / ogg).exists() or (ARCHIVE_DIR / ogg).stat().st_size <= 100:
-        logging.warning("held review has no usable audio: %s", clip_name)
+    # The approved person is fixed; a group or arbitrary destination is never
+    # accepted by this sink. Activation requires owner choice of this account.
+    chat = os.environ.get("HELD_REVIEW_OWNER_CHAT_ID", "").strip()
+    if chat != "19293781556@c.us":
+        logging.warning("held review owner destination missing or not permitted")
         return
-    # Send text before voice, but only to the known ops destination. The
-    # service's /audio route supplies the bytes to WAHA right away; unlike an
-    # Uguu link, its address is not the delivered artifact.
-    chat = alert_waha._ops_chat()
-    text = _held_review_text(profile, hit)
-    if await alert_waha.send_text(text, chat_id=chat):
-        base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
-        if not await alert_waha.send_voice(f"{base}/audio/{ogg}", chat_id=chat):
-            logging.warning("held review audio send failed: %s", clip_name)
-    else:
-        logging.warning("held review text send failed: %s", clip_name)
+    box = hit.get("box_heard") or "no box"
+    recording = hit.get("voice_url") or "recording unavailable"
+    text = (f"Held Box {box} | {hit.get('address') or 'location unclear'} | "
+            f"{hit.get('nature') or 'complaint unclear'} | {reason} | {recording}")
+    if not await alert_waha.send_text(text, chat_id=chat):
+        logging.warning("held review owner notification failed; decision remains saved")
 
 
 async def _hatzalah_brooklyn_grid_corridor(hit: dict) -> tuple | None:
@@ -3137,13 +3132,29 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                 return
         stats.event("fdny", f"held ({hold_reason}): {nature} @ {address}")
         ops_log(f"held ({hold_reason}): {nature} @ {address}")
-        hit["voice_url"] = await _held_recording(clip_name)
-        await _post_held_review("fdny", hit, clip_name)
+        if os.environ.get("FDNY_AUDIO_REVIEW", "0") != "1" and (
+                "independent audio check" in hold_reason or "audio review required" in hold_reason):
+            hold_reason += "; FDNY review disabled; terminal hold"
+            hit["hold_reason"] = hold_reason
+        # Persist the decision before upload/notification. These can fail or
+        # stall; neither may erase the reviewable outcome.
+        base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
+        audio_ref = f"{base}/audio/{clip_name}" if clip_name else ""
+        hit["voice_url"] = audio_ref
         stats.mark_alert("fdny", nature, address, False, failed=False, outcome="suppressed",
-                         voice_url=hit.get("voice_url", ""), reason=hold_reason)
+                         voice_url=audio_ref, reason=hold_reason)
         _append_alert_log({"t": now, "feed": "fdny", "nature": nature,
                            "address": address, "sent": False, "excerpt": hit["excerpt"]})
         _fdny_call_record(call, text, clip_name, hit, "suppressed", hold_reason)
+        try:
+            published = await asyncio.wait_for(_held_recording(clip_name), timeout=30)
+        except Exception as exc:
+            logging.warning("held recording enrichment failed (%s); decision retained", type(exc).__name__)
+            published = ""
+        if published:
+            hit["voice_url"] = published
+            stats.update_alert_recording("fdny", nature, address, audio_ref, published)
+        await _post_held_review("fdny", hit, clip_name)
         return
     try:
         call_ts = float(call.get("ts") or 0) or None
@@ -3159,9 +3170,11 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                  cid, time.monotonic()-verify_start, time.monotonic()-stage_start, outcome)
 
     ok = outcome == "sent"
-    if outcome == "suppressed":
-        hit["voice_url"] = await _held_recording(clip_name)
-        await _post_held_review("fdny", hit, clip_name)
+    audio_ref = ""
+    if outcome == "suppressed" and clip_name:
+        base = os.environ.get("RENDER_EXTERNAL_URL", "https://fdny-slim.onrender.com").rstrip("/")
+        audio_ref = f"{base}/audio/{clip_name}"
+        hit["voice_url"] = audio_ref
     stats.mark_alert("fdny", hit["nature"], hit["address"], ok,
                      failed=(outcome == "queued"), outcome=outcome,
                      voice_url=hit.get("voice_url", ""), reason=hit.get("hold_reason", ""))
@@ -3169,6 +3182,16 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                        "address": hit["address"], "sent": ok,
                        "excerpt": hit["excerpt"]})
     _fdny_call_record(call, text, clip_name, hit, outcome, hit.get("hold_reason", ""))
+    if outcome == "suppressed":
+        try:
+            published = await asyncio.wait_for(_held_recording(clip_name), timeout=30)
+        except Exception as exc:
+            logging.warning("held recording enrichment failed (%s); decision retained", type(exc).__name__)
+            published = ""
+        if published:
+            hit["voice_url"] = published
+            stats.update_alert_recording("fdny", hit["nature"], hit["address"], audio_ref, published)
+        await _post_held_review("fdny", hit, clip_name)
     logging.info("[fdny] ALERT %s @ %s - sent=%s", hit["nature"], hit["address"], ok)
 
 

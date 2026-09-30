@@ -208,6 +208,19 @@ class Stats:
             except Exception:
                 pass
 
+    def update_alert_recording(self, profile, nature, address, previous, published):
+        """Enrich a saved hold without another alert/counter change."""
+        with self._lock:
+            for alert in self.alerts:
+                if (alert["feed"] == profile and alert["nature"] == nature and
+                        alert["address"] == address and alert.get("voice") == previous):
+                    alert["voice"] = published
+                    try:
+                        self._hist_file.write_text(json.dumps(list(self.alerts)))
+                    except Exception:
+                        pass
+                    break
+
     @staticmethod
     def _age(ts):
         return None if ts is None else round(time.time() - ts, 1)
