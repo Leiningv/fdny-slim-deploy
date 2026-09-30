@@ -1875,7 +1875,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         try:
             import sullivan_colonies as scol
             if verified_label:
-                r0 = scol.match_colony_for_verified_address(verified_label)
+                r0 = scol.match_colony_for_verified_point(verified_label, lat, lon)
                 colony = r0.colony_name if r0.found else None
             # No transcript/name fallback: only a verified street address may
             # identify a colony. Similar channel names are never job location.
@@ -2155,8 +2155,6 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     if is_sullivan:
         street = re.sub(r",\s*[^,]+,\s*NY$", "", street, flags=re.I)
     addr_line = f"\N{ROUND PUSHPIN} *{street}*"
-    if is_sullivan and footer:
-        addr_line += f" ({footer})"
     if not confirmed:
         addr_line += " (not confirmed)"
     medical = re.search(
@@ -2170,11 +2168,14 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         r"sick person|medical emergency|ped(?:estrian)?|mva|mvc|accident|"
         r"collision|rollover|entrap)\w*\b", nature, re.I)
     icon = "\N{AMBULANCE}" if medical else "\N{FIRE}"
+    if is_sullivan and hit.get("verified_area"):
+        area = re.sub(r"^(?:Village|Town|City|Hamlet) of\s+", "", hit["verified_area"], flags=re.I)
+        addr_line = addr_line.replace(f"*{street}*", f"*{street}, {area}*")
     lines = [f"*{icon} {nature}*", "", addr_line]
+    if is_sullivan and footer:
+        lines.append(footer)
     if (hit.get("source") or "").removeprefix("zello-") in ("hatzalah", "hatzolah") and hit.get("patient_age") and hit["patient_age"].lower() not in nature.lower():
         lines.append(hit["patient_age"])
-    if is_sullivan and hit.get("verified_area"):
-        lines.append(f"*{hit['verified_area'].upper()}*")
     if hit.get("apartment"):
         lines.append(hit["apartment"])
     if crosses:

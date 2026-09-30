@@ -435,8 +435,8 @@ class TestSullivanTextNoGenericCounty(unittest.TestCase):
         hit = {"source": "zello-sullivan", "address": "48 Anemone Lane, Sullivan Co, NY",
                "nature": "Activated Fire Alarm", "verified_area": "Loch Sheldrake"}
         text = main.format_alert(hit, crosses="Bridge Circle", confirmed=True)
-        self.assertIn("*48 Anemone Lane*", text)
-        self.assertIn("*LOCH SHELDRAKE*", text)
+        self.assertIn("*48 Anemone Lane, Loch Sheldrake*", text)
+        self.assertNotIn("*LOCH SHELDRAKE*", text)
         self.assertNotIn("Sullivan Co, NY", text)
         del hit["verified_area"]
         text = main.format_alert(hit, confirmed=False)

@@ -1319,3 +1319,75 @@ def resolve_colony_for_alert(
     _ = geocode_hint
     match = match_colony_for_verified_address(verified_address or "")
     return match.colony_name if match.found else None
+
+
+def _verified_site_parts(label: str) -> tuple[str, str, str] | None:
+    """Parse compact labels or Nominatim's house, road, village, town form.
+
+    Never infer locality from county or replace a named village with its town.
+    """
+    parts = [p.strip() for p in label.split(',') if p.strip()]
+    if len(parts) < 3:
+        return None
+    if re.fullmatch(r'\d{1,6}(?:-\d{1,6})?', parts[0]):
+        street = parts[0] + ' ' + parts[1]
+        rest = parts[2:]
+    else:
+        street, rest = parts[0], parts[1:]
+    if not _parse_house_street(street):
+        return None
+    state = next(('NY' for p in rest if re.fullmatch(r'(?:NY|New York)(?:\s+\d{5})?', p, re.I)), '')
+    if not state:
+        return None
+    # The first locality in Nominatim's hierarchy is the most specific.
+    area = re.sub(r'^(?:Village|Town|City|Hamlet) of\s+', '', rest[0], flags=re.I).strip()
+    if not area or re.search(r'\b(?:County|United States|New York|NY)\b', area, re.I):
+        return None
+    return street, area.casefold(), state
+
+
+def match_colony_for_verified_point(verified_label: str, lat, lon) -> ColonyMatchResult:
+    """Exact house/road/locality/state AND <=250m coordinate agreement.
+
+    No fuzzy road spelling, county substitution, name-only or missing-coordinate
+    fallback. More than one matching map label remains ambiguous.
+    """
+    result = ColonyMatchResult(attempted=bool(verified_label))
+    parts = _verified_site_parts(verified_label or '')
+    try:
+        latitude, longitude = float(lat), float(lon)
+        import math
+        if not math.isfinite(latitude) or not math.isfinite(longitude):
+            raise ValueError('nonfinite')
+    except (TypeError, ValueError):
+        print('[COLONY] Unenriched: missing verified coordinates')
+        return result
+    if parts is None:
+        print('[COLONY] Unenriched: incomplete verified label')
+        return result
+    job, area, state = parts
+    candidates = []
+    for row in _COLONY_ADDRESS_ENTRIES:
+        row_parts = _verified_site_parts(row['address'])
+        if not row_parts or row_parts[1:] != (area, state):
+            continue
+        if _normalize_colony_address(job) != _normalize_colony_address(row_parts[0]):
+            continue
+        try:
+            a, b = float(row['lat']), float(row['lon'])
+            if not math.isfinite(a) or not math.isfinite(b):
+                continue
+            r = math.pi / 180
+            h = math.sin((a-latitude)*r/2)**2 + math.cos(a*r)*math.cos(latitude*r)*math.sin((b-longitude)*r/2)**2
+            distance = 12742000 * math.asin(min(1, math.sqrt(h)))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if distance <= 250:
+            candidates.append(row)
+    names = {r['colony_name'] for r in candidates}
+    if len(names) != 1:
+        print('[COLONY] Unenriched: no exact coordinate-agreed site or ambiguous map labels')
+        return result
+    row = candidates[0]
+    print('[COLONY] Exact coordinate-agreed match: ' + row['colony_name'])
+    return ColonyMatchResult(True, True, row['colony_name'], row['address'], job, 1.0)
