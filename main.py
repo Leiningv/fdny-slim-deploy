@@ -1400,6 +1400,12 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["hold_reason"] = "Hatzalah distinct UWS/Broadway request; complaint/address pairing unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
+    # Owner-requested future-only nature exclusion. Keep the candidate and
+    # recording in held history; never clear its label and send a blank post.
+    if re.match(r"^automatic alarm(?:\s*,|$)", (hit.get("nature") or "").strip(), re.I):
+        hit["hold_reason"] = "Automatic Alarm excluded by owner"
+        stats.event(profile, "Held: " + hit["hold_reason"])
+        return "suppressed"
     area = spoken_area(source_text) if profile == "fdny" else ""
     highway_area_exception = bool(area and hit.get("spoken_highway_area") == area and
                                   hit["address"].startswith(area + ", "))

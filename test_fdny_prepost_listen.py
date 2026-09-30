@@ -41,7 +41,8 @@ class FDNYCrossDisplay(unittest.IsolatedAsyncioTestCase):
         # any future box rewrite needs an explicit matching source/map gate.
         phrase = ('Unassigned class 3 Brooklyn box 2435 479 East 29th Street, '
                   'Foster to Newkirk Avenue is automatic alarm.')
-        hit = detect.analyze(phrase, 'fdny')
+        # Cross-display regression uses a still-permitted nature.
+        hit = detect.analyze(phrase.replace('automatic alarm','manual alarm'), 'fdny')
         self.assertEqual(hit['box_heard'], '2435')
         self.assertEqual(hit['cross'], 'Foster & Newkirk Avenue')
         with (patch.object(main,'geocode_verify',new_callable=AsyncMock,

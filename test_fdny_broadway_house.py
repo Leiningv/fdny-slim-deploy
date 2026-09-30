@@ -24,7 +24,8 @@ class BroadwayHouse(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(h and h['address'].startswith('1333 Broadway'))
 
     async def test_verified_house_posts_without_invented_cross(self):
-        h=detect.analyze(DISPATCH,'fdny')
+        # Preserve the address/send regression with a still-permitted alarm.
+        h=detect.analyze(DISPATCH.replace('automatic alarm','manual alarm'),'fdny')
         with (patch.object(main,'geocode_verify',new_callable=AsyncMock,
                            return_value=(True,False,'1333 BROADWAY, Brooklyn, NY',40.690258,-73.922899,'Brooklyn')),
               patch.object(main,'_box_lookup',new_callable=AsyncMock,
