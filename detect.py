@@ -1209,10 +1209,10 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     if profile == "hatzolah":
         # Preserve the explicit police dispatch request, with no injury claim.
-        for m in re.finditer(r"\bpd\s+requesting\s+jumper\s+down\b", t):
+        for m in re.finditer(r"\bpd\s+requesting\s+(?:they\s+have\s+a\s+)?jumper\s+down\b", t):
             if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$",
                              t[max(0,m.start()-40):m.start()]):
-                return _addr_title(m.group())
+                return "Pd Requesting Jumper Down"
         # Explicit dispatch complaint, not a diagnosis inferred from routing.
         # A bare EDP unit label or mental-health training is not a complaint.
         for m in re.finditer(r"\b(?:edp|psych)\s+situation\b", t):
