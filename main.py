@@ -1555,6 +1555,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["cross"] = ""
         stats.event(profile, f"box-only verified address from Brooklyn Box {heard_box}: {candidate}")
         verified_label, locality = candidate, "Brooklyn"
+    if hit.get("directional_numbered_corner") and hit.get("area_defaulted"):
+        hit["hold_reason"]="directional corner borough unresolved"
+        return "suppressed"
     if GEOCODE_VERIFY and not hit.get("box_only"):
         location_check_started = time.monotonic()
         # Intersections require BOTH spoken roads at one point. The ordinary
@@ -1573,7 +1576,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             # explicitly named area. Never print the false second road or a
             # map-computed substitute. A defaulted locality gets no fallback.
             if not verified and profile.lower().removeprefix("zello-") in ("hatzolah", "hatzalah") \
-                    and not hit.get("area_defaulted") and re.search(
+                    and not hit.get("area_defaulted") and not hit.get("directional_numbered_corner") and re.search(
                         r"\b(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|"
                         r"Drive|Dr|Place|Pl|Lane|Ln|Parkway|Pkwy|Court|Ct|Terrace|Ter|"
                         r"Broadway)\b$", side_a, re.I):

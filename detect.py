@@ -86,6 +86,8 @@ def get_hatzolah_area(text: str) -> str:
     """TSL-ChevraHatzalah mixes NYC divisions AND Sullivan County - trust the
     place names in the dispatch itself to set the area (user rule 9/28)."""
     t = text.lower()
+    if re.search(r"\b(?:west\s*side|manhattan)\b",t) and not re.search(r"\bmanhattan beach\b",t):
+        return "Manhattan"
     # Explicitly excluded Rockland locations cannot inherit Brooklyn's
     # default area. The final coverage gate suppresses these.
     if re.search(r"\b(?:rockland|monsey|spring valley|new square|suffern|haverstraw|garnerville|airmont|chestnut ridge)\b", t):
@@ -1596,6 +1598,25 @@ def _hatzalah_dispatch_corner(text: str):
     return _addr_title(a), _addr_title(b)
 
 
+def _directional_numbered_corner(text: str):
+    """Explicit Manhattan-style directional numbered street, not a house.
+
+    Require a complete named second road. Digit-by-digit numbers are accepted
+    only inside this location grammar, never for patient/member fields.
+    """
+    digit={"zero":"0","one":"1","two":"2","three":"3","four":"4",
+           "five":"5","six":"6","seven":"7","eight":"8","nine":"9"}
+    words="|".join(digit)
+    text=re.sub(r"\b(West|East)\s+("+words+r")[ -]+("+words+r")\b",
+                lambda m:m[1]+" "+digit[m[2].lower()]+digit[m[3].lower()],text,flags=re.I)
+    road=r"[A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2}\s+(?:Avenue|Ave|Street|St|Road|Rd|Drive|Dr|Boulevard|Blvd)"
+    m=re.search(r"\b(West|East)\s+(\d{1,3})(?:st|nd|rd|th)?(?:\s+(?:Street|St))?\s+(?:at|and|&)\s+("+road+r")\b",text,re.I)
+    if not m or not 1<=int(m[2])<=299:
+        return None
+    n=int(m[2]);suffix="th" if 11<=n%100<=13 else {1:"st",2:"nd",3:"rd"}.get(n%10,"th")
+    return f"{m[1].title()} {n}{suffix} Street",_addr_title(m[3])
+
+
 def patient_age(text: str) -> str:
     """Explicit age wording only, never a bare member/unit number."""
     ages = re.findall(r"\b(\d{1,3})[ -]+(month|year|day|week)s?[ -]+old\b", text, re.I)
@@ -1795,6 +1816,11 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         box = detect_box(low)
         if box and _FDNY_JOBISH_RE.search(low) and not _FDNY_SKIP_RE.search(low):
             addr = f"FDNY Box {box}, Brooklyn, NY"
+    directional_corner = _directional_numbered_corner(text) if profile == "hatzolah" else None
+    if directional_corner:
+        addr=_with_area(f"{directional_corner[0]} & {directional_corner[1]}",profile,t)
+        cross=""
+        direct_pair=None
     if not addr:
         return None
     addr = re.sub(r"^(?:[Bb]ack\s+)?(?:[Uu]p|[Bb]y)\s+", "", addr)
@@ -1975,6 +2001,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "priority": is_priority(t),
         "cross": cross,
         "inherited_numbered_cross": inherited_numbered_cross,
+        "directional_numbered_corner": bool(directional_corner),
         "single_spoken_cross": (
             re.search(r"\b(?:that'?s\s+)?at\s+((?:East|West|North|South|E|W|N|S)\s+"
                       r"\d{1,3}(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", t, re.I).group(1)
