@@ -67,6 +67,10 @@ def generic_nature_invariant(transcript: str, nature: str) -> bool:
     """Safety invariant, independent of phrase extraction and review flags."""
     generic = re.fullmatch(r"(?:phone alarm|automatic alarm|fire alarm|alarm activation|class 3|fire|unknown|unknown problem)", (nature or "").strip(), re.I)
     if not generic: return False
+    for m in re.finditer(r"\b(?:gas detector activation|gas alarm|boat in distress)\b", transcript or "", re.I):
+        prefix = (transcript or "")[max(0,m.start()-35):m.start()]
+        if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,3}$", prefix, re.I):
+            return True
     # Specific non-fire complaints must never degrade to a transmission
     # label, even if extraction loses them. Require job-local wording and
     # reject negated complaints; unrelated unit chatter supplies no nature.
@@ -74,7 +78,8 @@ def generic_nature_invariant(transcript: str, nature: str) -> bool:
                          r"(?:manhole(?:\s+(?:fire|smoke|explosion|cover))?|"
                          r"elevator|water\s+(?:condition|leak)|burst\s+pipe|"
                          r"wires\s+down|transformer|electrical(?:\s+condition)?|"
-                         r"carbon\s+monoxide|co\s+alarm|gas\s+(?:leak|odor)|"
+                         r"carbon\s+monoxide|co\s+alarm|gas\s+(?:leak|odor|alarm|detector\s+activation)|"
+                         r"boat\s+in\s+distress|"
                          r"unstable\s+facade|unsafe\s+facade)\b", transcript or "", re.I):
         if not _NEGATED.search((transcript or "")[max(0,m.start()-25):m.start()]):
             return True

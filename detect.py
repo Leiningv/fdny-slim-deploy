@@ -343,9 +343,9 @@ def extract_cross_street(text: str) -> str | None:
     """'13th avenue and 50th street' -> '13th Ave & 50th St'; '14 and 46' -> '14th Ave & 46th St'."""
     t = _norm(text).lower()
     stypes = r"(ave|avenue|st|street|blvd|boulevard|rd|road|dr|drive|pl|place|ln|lane|ct|court|pkwy|parkway)"
-    num = rf"(?:\d{{1,2}}(?:st|nd|rd|th)?|{_ORD_WORD_RE})"
+    num = rf"(?:\d{{1,3}}(?:st|nd|rd|th)?|{_ORD_WORD_RE})"
     m = re.search(
-        rf"(?P<n1>{num})\s+(?P<t1>{stypes})\s+(?:and|at|@|&)\s+(?P<n2>{num})\s+(?P<t2>{stypes})",
+        rf"(?<![\d-])(?P<n1>{num})\s+(?P<t1>{stypes})\s+(?:and|at|@|&)\s+(?P<n2>{num})\s+(?P<t2>{stypes})\b",
         t, re.I,
     )
     if m:
@@ -1249,6 +1249,11 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\belevator\b")
     if v: return v
+    if profile == "fdny":
+        for pattern in [r"\bgas detector activation\b", r"\bgas alarm\b", r"\bboat in distress\b"]:
+            for m in re.finditer(pattern, t):
+                if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$", t[max(0,m.start()-30):m.start()]):
+                    return _addr_title(m.group(0))
     v = vt(r"\b(?:co alarm|carbon monoxide)\b")
     if v: return v
     if profile == "fdny":
@@ -1674,6 +1679,7 @@ def _directional_numbered_corner(text: str):
     text=re.sub(r"\b(West|East)\s+("+words+r")[ -]+("+words+r")\b",
                 lambda m:m[1]+" "+digit[m[2].lower()]+digit[m[3].lower()],text,flags=re.I)
     road=r"[A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2}\s+(?:Avenue|Ave|Street|St|Road|Rd|Drive|Dr|Boulevard|Blvd)"
+    road = r"(?:" + road + r"|(?:Avenue|Ave) [ACDHIJKLMNOPRSTUVWXY])"
     m=re.search(r"\b(West|East)\s+(\d{1,3})(?:st|nd|rd|th)?(?:\s+(?:Street|St))?\s+(?:at|and|&)\s+("+road+r")\b",text,re.I)
     if not m or not 1<=int(m[2])<=299:
         return None
@@ -1737,7 +1743,10 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         return None
     any_units = _ANY_UNITS_RE.search(t)
     head_over = _HEAD_OVER_RE.search(t)
-    if not is_emergency(t) and not any_units and not head_over:
+    directional_dispatch = bool(profile == "hatzolah" and
+        re.search(r"\bany units? for\b", t, re.I) and
+        _directional_numbered_corner(t) and get_nature(t, profile))
+    if not is_emergency(t) and not any_units and not head_over and not directional_dispatch:
         return None
     if is_chatter(t):
         return None
@@ -1885,7 +1894,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         box = detect_box(low)
         if box and _FDNY_JOBISH_RE.search(low) and not _FDNY_SKIP_RE.search(low):
             addr = f"FDNY Box {box}, Brooklyn, NY"
-    directional_corner = _directional_numbered_corner(text) if profile == "hatzolah" else None
+    directional_corner = _directional_numbered_corner(t) if profile == "hatzolah" else None
     if directional_corner:
         addr=_with_area(f"{directional_corner[0]} & {directional_corner[1]}",profile,t)
         cross=""
