@@ -17,7 +17,7 @@ class AutomaticHold(unittest.IsolatedAsyncioTestCase):
             outcome,h=await main.verify_zello_with_second_listen('zello-hatzalah',h,Mock(),'unused.wav',fresh_ts=time.time())
         self.assertEqual(outcome,'suppressed');listen.assert_not_awaited()
     async def test_other_natures_unchanged(self):
-        for n in ['Fire, Apartment 2H','Oven Fire, First Floor','Manual Alarm','Alarm Activation','Activated Fire Alarm','Automatic Fire Alarm']:
+        for n in ['Fire, Apartment 2H','Oven Fire, First Floor','Manual Alarm','Activated Fire Alarm','Automatic Fire Alarm']:
             h={'nature':n,'address':'501 New Lots Avenue, Brooklyn, NY','excerpt':'test'}
             with patch.object(main.control,'muted_feeds',return_value={'fdny'}):
                 self.assertEqual(await main.verify_and_send('fdny',h,Mock()),'suppressed')

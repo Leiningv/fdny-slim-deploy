@@ -14,6 +14,25 @@ def _road(s):
     return s
 
 
+def normalize_pair(sides):
+    """Expand an explicitly spoken shared road type, never a map guess."""
+    if len(sides) != 2:
+        return sides
+    sides = list(sides)
+    types = {"avenues": "Avenue", "streets": "Street", "roads": "Road",
+             "places": "Place", "boulevards": "Boulevard", "drives": "Drive",
+             "lanes": "Lane", "courts": "Court", "parkways": "Parkway"}
+    for i, side in enumerate(sides):
+        m = re.search(r"\b(" + "|".join(types) + r")$", side, re.I)
+        if m:
+            sides[i] = side[:m.start()] + types[m.group(1).lower()]
+    explicit = re.search(r"\b(Avenue|Street|Road|Place|Boulevard|Drive|Lane|Court|Parkway|Ave|St|Rd|Pl)$",
+                         sides[1], re.I)
+    if explicit and re.fullmatch(r"(?:[A-Za-z][A-Za-z.'-]+|\d+(?:st|nd|rd|th))", sides[0], re.I):
+        sides[0] += " " + explicit.group(1)
+    return sides
+
+
 async def verify(street: str, cross: str, lat: float, lon: float) -> bool:
     """True iff distinct named road ways share a node within 250m of address.
     No source/map failure is a pass. Aimed at display, not location creation.

@@ -1406,8 +1406,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         return "suppressed"
     # Owner-requested future-only nature exclusion. Keep the candidate and
     # recording in held history; never clear its label and send a blank post.
-    if re.match(r"^automatic alarm(?:\s*,|$)", (hit.get("nature") or "").strip(), re.I):
-        hit["hold_reason"] = "Automatic Alarm excluded by owner"
+    if re.match(r"^(?:automatic alarm|alarm activation)(?:\s*,|$)", (hit.get("nature") or "").strip(), re.I):
+        excluded = "Alarm Activation" if (hit.get("nature") or "").strip().lower().startswith("alarm activation") else "Automatic Alarm"
+        hit["hold_reason"] = excluded + " excluded by owner"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
     area = spoken_area(source_text) if profile == "fdny" else ""
@@ -1817,14 +1818,11 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         import spoken_cross as crossmap
         base_road = re.sub(r"^\s*\d+[A-Za-z-]*\s+", "", hit["address"].split(",")[0])
         sides = [part.strip() for part in cross.split("&", 1)]
-        # Dispatch commonly omits the repeated type: "Foster to Newkirk
-        # Avenue" means Foster Avenue and Newkirk Avenue. Only inherit an
-        # explicit type when the first side is one bare name and both sides
-        # independently intersect this verified street near the house.
-        if (len(sides) == 2 and re.fullmatch(r"[A-Za-z][A-Za-z.'-]+", sides[0])
-                and (typed := re.search(r"\b(Avenue|Street|Road|Place|Ave|St|Rd|Pl)\b$",
-                                       sides[1], re.I))):
-            sides[0] += " " + typed.group(1)
+        # Dispatch can omit a repeated road type and pluralize the last one:
+        # "5th and 6th Avenues". Expand only an explicit spoken type. Both
+        # normalized roads still need independent map proof near the house.
+        from spoken_cross import normalize_pair
+        sides = normalize_pair(sides)
         try:
             verdicts = await asyncio.gather(*(asyncio.wait_for(
                 crossmap.verify(base_road, side, lat, lon), timeout=10)
