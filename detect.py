@@ -1092,6 +1092,17 @@ def get_nature(text: str, profile: str = "") -> str:
     cleaned. Returns the matched phrase ('' when nothing is discernible).
     Cascade order is unchanged: content natures beat transmission types."""
     t = text.lower()
+    # Retain the exact observed complaint, never a diagnosis or facility name.
+    exact = (r"\bpediatric emergency\b" if profile == "hatzolah" else
+             r"\boven fire\b" if profile == "fdny" else "")
+    if exact:
+        m = re.search(exact, t)
+        if m:
+            before = t[max(0, m.start()-40):m.start()]
+            if re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$", before):
+                return ""
+            if re.search(r"\b(?:for|reporting)\s+(?:an?\s+)?$", before):
+                return _addr_title(m.group())
     # A leading "working fire" ASR fragment can be transmission chatter while
     # the actual dispatched complaint later says automatic alarm. This FDNY
     # case must not be promoted to fire from the earlier fragment. A later
