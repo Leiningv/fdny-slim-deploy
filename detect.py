@@ -1195,6 +1195,12 @@ def get_nature(text: str, profile: str = "") -> str:
         v = vt(r"\bnasal obstruction\b")
         if v and re.search(r"\b(?:child|patient|male|female)\b", t):
             return v
+    if profile == "hatzolah":
+        # Radio complaint wording only. Preserve the actual ASR phrase, not a
+        # diagnosis or an inferred street number from the surrounding readout.
+        for m in re.finditer(r"\b(?:severe difficulty breather|severe deep breather|severe breather|very big breather)\b", t):
+            if re.search(r"\b(?:for|we have|patient|male|female|child)\b", t[max(0,m.start()-45):m.start()]) and not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$", t[max(0,m.start()-40):m.start()]):
+                return _addr_title(m.group())
     v = vt(r"difficulty breathing|trouble breathing|shortness of breath|can't breathe|cant breathe|cannot breathe|not breathing|respiratory distress|turning blue")
     if v: return v
     v = vt(r"\b(?:cardiac arrest|heart attack|full arrest|cpr in progress)\b")
