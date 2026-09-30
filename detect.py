@@ -1933,6 +1933,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     # primary roads into this rule.
     three_roads = extract_spoken_three_road_location(t) if profile != "fdny" else None
     direct_pair = extract_direct_street_pair(t) if profile != "fdny" else None
+    placeholder_between = bool(profile == "hatzolah" and re.search(r"\b[A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,2}\s+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln|Parkway|Pkwy)\s+between\s+X\s+and\s+Y\b", t))
     if profile == "hatzolah":
         dispatch_corner = _hatzalah_dispatch_corner(t)
         if dispatch_corner:
@@ -1942,6 +1943,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
 
     if three_roads:
         direct_pair = (three_roads[0], three_roads[1])
+    if placeholder_between:
+        direct_pair = None
     if profile == "hatzolah" and direct_pair:
         first = direct_pair[0]
         later = list(re.finditer(
@@ -1966,7 +1969,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
             r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|"
             r"Place|Pl|Lane|Ln)\s+between\b", t, re.I)
     unnumbered_before_cross = None
-    if profile == "hatzolah" and spoken_pair:
+    if profile == "hatzolah" and spoken_pair and not placeholder_between:
         unnumbered_before_cross = re.search(
             r"\b([A-Z][a-zA-Z'-]*(?:\s+[A-Z][a-zA-Z'-]*){0,2}\s+"
             r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln))\s+between\b", t)
@@ -2241,7 +2244,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                       r"\d{1,3}(?:st|nd|rd|th)?\s+(?:Street|St|Avenue|Ave))\b", t, re.I) else ""),
         "direct_cross_candidate": direct_pair[1] if direct_pair and not three_roads else "",
         "spoken_three_road_crosses": f"{three_roads[1]} & {three_roads[2]}" if three_roads else (cross or "") if profile == "hatzolah" and (unnumbered_before_cross or numbered_before_cross) and not inherited_numbered_cross else "",
-        "spoken_between_crosses_required": bool(profile == "hatzolah" and re.search(r"\b(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln)\s+between\b", t, re.I) ),
+        "placeholder_crosses_unresolved": placeholder_between,
+        "spoken_between_crosses_required": bool(placeholder_between or (profile == "hatzolah" and re.search(r"\b(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln)\s+between\b", t, re.I) and not numbered_before_cross)),
         "terminal_id_present": bool(re.search(r"\bterminal\s+(?:\d\s*){5,}", _norm(text), re.I)),
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,

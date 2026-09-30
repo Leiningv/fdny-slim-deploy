@@ -34,7 +34,7 @@ class BetweenCrosses(unittest.IsolatedAsyncioTestCase):
   h=detect.analyze('Any units for 1339 Union Street between Brooklyn and New York for unresponsive?','zello-hatzalah')
   self.assertEqual(h['address'],'1339 Union Street, Brooklyn, NY')
   self.assertEqual(h['cross'],'Brooklyn & New York')
-  self.assertTrue(h['spoken_between_crosses_required'])
+  self.assertFalse(h['placeholder_crosses_unresolved'])
   self.assertEqual(h['spoken_three_road_crosses'],'Brooklyn & New York')
  def test_existing_verified_grid_remains_whole_location(self):
   h=detect.analyze('70 units to 12 between 45 and 46 for an infant difficulty breathing.','zello-hatzalah')

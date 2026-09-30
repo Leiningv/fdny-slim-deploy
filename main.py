@@ -1400,8 +1400,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["hold_reason"] = "Hatzalah distinct UWS/Broadway request; complaint/address pairing unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
-    if hit.get("spoken_between_crosses_required") and not hit.get("cross") and " between " not in hit.get("address", "").lower():
-        hit["hold_reason"] = "spoken between crosses lost during extraction"
+    if hit.get("placeholder_crosses_unresolved") or (hit.get("spoken_between_crosses_required") and not hit.get("cross") and " between " not in hit.get("address", "").lower()):
+        hit["hold_reason"] = "spoken between crosses unresolved during transcription" if hit.get("placeholder_crosses_unresolved") else "spoken between crosses lost during extraction"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
     # Owner-requested future-only nature exclusion. Keep the candidate and
@@ -2302,6 +2302,8 @@ def _ptt_group_match(rec: dict, started: float, addr: str, gap: float, nature: s
         if old_house and new_house and old_house.group(1) != new_house.group(1): return False
     if nature and rec.get("nature") and nature.lower() != rec["nature"].lower():
         return False
+    if nature and rec.get("address") and not rec.get("nature"):
+        return False  # a later nature-only fragment cannot complete a separate location dispatch
     return bool((addr and rec["address"]) or (rec["opener"] and not rec["address"])
                 or (rec["opener"] and not addr))
 
