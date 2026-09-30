@@ -82,10 +82,20 @@ FIVE_TOWNS_AREAS = {
 }
 
 
+def _rego_saunders_corner(text: str) -> bool:
+    """Only the audio-grounded Rego Park / Saunders / 64 Road dispatch shape.
+    The observed Queen Trigo Park ASR variant is not a general Queens alias.
+    Both roads remain subject to the sender's intersection verification.
+    """
+    return bool(re.search(r"\b(?:in\s+)?Queens?\s*,?\s*(?:Rego|Trigo)\s+Park\s*,?\s+Saunders(?:\s+Street)?\s+(?:and|&)\s+64(?:th)?\s+Road\b", text, re.I))
+
+
 def get_hatzolah_area(text: str) -> str:
     """TSL-ChevraHatzalah mixes NYC divisions AND Sullivan County - trust the
     place names in the dispatch itself to set the area (user rule 9/28)."""
     t = text.lower()
+    if _rego_saunders_corner(text):
+        return "Queens"
     if re.search(r"\b(?:west\s*side|manhattan)\b",t) and not re.search(r"\bmanhattan beach\b",t):
         return "Manhattan"
     # This complete spoken Beach-number/Rockaway pair is a Queens location,
@@ -1895,6 +1905,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         dispatch_corner = _hatzalah_dispatch_corner(t)
         if dispatch_corner:
             direct_pair = dispatch_corner
+        if _rego_saunders_corner(t):
+            direct_pair = ("Saunders Street", "64 Road")
 
     if three_roads:
         direct_pair = (three_roads[0], three_roads[1])
@@ -1931,7 +1943,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         # the second as a candidate downstream.
         numbered_grid = extract_cross_street(t) if profile == "hatzolah" else None
         bare_named_pair = bool(profile == "hatzolah" and direct_pair == ("Kingston", "Montgomery"))
-        addr = _with_area(numbered_grid or (" & ".join(direct_pair) if bare_named_pair else direct_pair[0]), profile, t)
+        rego_pair = bool(profile == "hatzolah" and _rego_saunders_corner(t))
+        addr = _with_area(numbered_grid or (" & ".join(direct_pair) if bare_named_pair or rego_pair else direct_pair[0]), profile, t)
     elif spoken_pair and "&" in spoken_pair and re.search(
             r"\b(?:for|at|on|of|in)\s+", t, re.I):
         addr = _with_area(spoken_pair, profile, t)
