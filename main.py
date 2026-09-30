@@ -1396,6 +1396,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["hold_reason"] = "Sullivan numbered dispatch jobs; complaint/address pairing unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
+    if detect.hatzalah_uws_mixed_request(hit.get("dispatch_source_text") or source_text, profile):
+        hit["hold_reason"] = "Hatzalah distinct UWS/Broadway request; complaint/address pairing unverified"
+        stats.event(profile, "Held: " + hit["hold_reason"])
+        return "suppressed"
     area = spoken_area(source_text) if profile == "fdny" else ""
     highway_area_exception = bool(area and hit.get("spoken_highway_area") == area and
                                   hit["address"].startswith(area + ", "))

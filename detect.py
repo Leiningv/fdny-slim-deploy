@@ -1678,6 +1678,24 @@ def split_dispatch_jobs(text: str, profile: str) -> list[str]:
             if text[a:b].strip(" .,\n")]
 
 
+def hatzalah_uws_mixed_request(text: str, profile: str) -> bool:
+    """Observed first complaint/corner followed by distinct UWS/Broadway request.
+    Hold the whole recording, never choose its first incident or borough.
+    """
+    if profile.removeprefix("zello-") not in ("hatzolah", "hatzalah"):
+        return False
+    boundary = re.search(r"\bany\s+units?\s+on\s+the\s+upper\s+west\s+side\s+"
+                         r"(?:for|to)\s+west\s+7(?:th)?\s+(?:at|and)\s+broadway\b"
+                         r".{0,35}\b(?:with\s+the\s+)?backup\s+to\s+west\s+side\s+901\b", text or "", re.I)
+    if not boundary:
+        return False
+    first = (text or "")[:boundary.start()]
+    # Ground only this observed first-job shape; repeats and unit labels alone
+    # cannot create a second incident. No broad locality or street aliases.
+    return bool(re.search(r"\bfranklin\s+(?:and|&)\s+myrtle\b.{0,35}"
+                          r"\b(?:for\s+)?child\s+difficulty\s+breathing\b", first, re.I))
+
+
 def _hatzalah_mixed_backup_medic(text: str) -> bool:
     """Fail closed on backup address plus later separate medic complaint.
 

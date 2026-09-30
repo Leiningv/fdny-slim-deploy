@@ -21,6 +21,8 @@ def complaint_lost(text, nature):
     return fdny_audio_gate.unclassified_fire_complaint(text, nature)
 
 def mixed(text, profile):
+    if detect.hatzalah_uws_mixed_request(text, profile):
+        return True
     if detect.sullivan_numbered_jobs(text, profile):
         return True
     if profile == 'fdny':
