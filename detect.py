@@ -1017,6 +1017,8 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
                        "blvd": "boulevard", "pl": "place", "ln": "lane",
                        "pkwy": "parkway"}.get(hn.group(4), hn.group(4))
                 street = " ".join(x for x in (nm, ordw, typ) if x)
+                if profile == "sullivan" and re.match(r"\s+extension\b", _norm(text).lower()[hn.end():]):
+                    street += " extension"
                 return _with_area(f"{hn.group(1)} {_addr_title(street)}",
                                   profile, text)
     if profile == "fdny" and re.search(r"\b(?:subway\s+)?emergency\s+exits?\b", text, re.I):
@@ -1127,6 +1129,19 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\b(?:auto|vehicle|car)\s+extrication\b")
     if v: return v
+    # Sullivan formal dispatch puts the house immediately after the complaint.
+    # That number is not apparatus chatter when a typed house-road follows.
+    if profile == "sullivan":
+        mva = re.search(r"\b(?:a\s+)?(?:priority|prior)\s+response\s+"
+                        r"(motor vehicle accident)\s*[,;.]?\s+\d{1,5}\s+"
+                        r"(?:[a-z][a-z'-]*\s+){1,5}"
+                        r"(?:street|st|road|rd|avenue|ave|drive|dr)\b", t)
+        if mva:
+            return _addr_title(mva.group(1))
+        alert = re.search(r"\b(?:for\s+)?(?:a\s+)?medical alert activation\b", t)
+        if alert and not re.search(r"\b(?:test|testing|training|cancelled|canceled)\b"
+                                  r"|\b(?:no|not|negative)\s+(?:a\s+)?medical alert", t):
+            return "Medical Alert Activation"
     v = vt(r"\b(?:mva|mvc|motor vehicle accident|rollover|entrapment|car accident|auto accident|vehicle accident)\b")
     if v: return v
     v = vt(r"difficulty breathing|trouble breathing|shortness of breath|can't breathe|cant breathe|cannot breathe|not breathing|respiratory distress|turning blue")
@@ -1267,6 +1282,9 @@ def get_nature(text: str, profile: str = "") -> str:
                                    t[max(0, floor.start()-12):floor.start()]):
             return _addr_title(floor.group(0))
     if profile == "fdny" and not _negative_fire_context(t):
+        truck = re.search(r"\b(?:for|reporting)\s+(fire\s+in\s+(?:a\s+)?(?:sanitation\s+)?truck)\b", t)
+        if truck and not re.search(r"\b(?:test|training|drill)\b", t):
+            return _addr_title(truck.group(1))
         vehicle_fire = re.search(r"\b(?:truck|car|vehicle)\s+fire\b", t)
         if vehicle_fire:
             return _addr_title(vehicle_fire.group(0))
