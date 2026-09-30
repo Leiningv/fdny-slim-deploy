@@ -1903,6 +1903,12 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     full_boxes = re.findall(r"\bbox\s+(\d{4})\b", t, re.I)
     if full_boxes and box_heard and len(re.search(r"\bbox\s+(\d+)\b", t, re.I).group(1)) > 4:
         box_heard = full_boxes[-1].zfill(4)
+    if profile == "hatzolah" and not cross:
+        directional = re.search(r"\b(East|West|North|South)\s+(\d{1,3})(?:st|nd|rd|th)?\b", text, re.I)
+        if directional and re.search(r"\b(?:and|at|off|corner|terrace)\b", text[:directional.start()], re.I):
+            num=int(directional.group(2))
+            suffix="th" if 11 <= num % 100 <= 13 else {1:"st",2:"nd",3:"rd"}.get(num%10,"th")
+            cross=f"{directional.group(1).title()} {num}{suffix} Street"
     return {
         "spoken_time": spoken_time,
         "source": source,

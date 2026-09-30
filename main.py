@@ -1708,32 +1708,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             cross.lower() == hit["address"].split(",")[0].lower() or
             (direct_pair_verified and cross.lower() == direct_candidate.lower())):
         cross = ""  # the spoken intersection already IS the location line
-    if cross and "&" not in cross and lat is not None and lon is not None \
-            and verified_label:
-        # single spoken cross ('off Woodbine Street') - complete the pair
-        # from the map, spoken side first
-        comp, _exact = await _cross_streets(lat, lon, hit["address"])
-        if comp and _exact:
-            spoken = cross.strip().lower()
-            other = [p.strip() for p in comp.split("&")
-                     if p.strip() and p.strip().lower() != spoken]
-            if other:
-                cross = f"{cross} & {other[0]}"
-                stats.event(profile, f"cross completed from map: {cross}")
-    if not cross and not direct_pair_verified and not hit.get("unresolved_spoken_corner_fallback") \
-            and not hit.get("direct_cross_candidate") and not spoken_three \
-            and lat is not None and lon is not None and verified_label \
-            and profile.lower().removeprefix("zello-") != "sullivan":
-        street_core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"])
-        street_core = re.sub(r"[,.;].*$", "", street_core).strip().lower()
-        if street_core and street_core in verified_label.lower():
-            cross, exact = await _cross_streets(lat, lon, hit["address"])
-            cross = cross or ""
-            if cross and not exact:
-                stats.event(profile, "approximate map crosses omitted")
-                cross = ""
-            if cross:
-                stats.event(profile, f"cross streets (computed): {cross}")
+    # Cross display is dispatch evidence only. Never complete a single
+    # spoken cross or invent a pair from map neighbors.
     # A numbered FDNY address can be sound while the vendor's spoken-cross
     # transcription is not. Verify each cross independently against actual
     # street geometry near the exact house; never replace an unverified spoken
@@ -2168,7 +2144,7 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
     if hit.get("apartment"):
         lines.append(hit["apartment"])
     if crosses:
-        lines.append(f"C/s {crosses}" if "&" in crosses else f"off {crosses}")
+        lines.append(f"C/s {crosses}")
     if box:
         line = f"Box {box}"
         if box_closest:
@@ -2300,6 +2276,13 @@ async def verify_zello_with_second_listen(profile: str, hit: dict, stats,
     if outcome == "verified":
         return await verify_and_send(profile, hit, stats, clip_name,
                                       fresh_ts=fresh_ts, audio_ts=fresh_ts), hit
+    if profile.removeprefix("zello-") == "sullivan":
+        try:
+            import sullivan_gazetteer
+            audit = await sullivan_gazetteer.audit_hold(original, SEG_DIR)
+            stats.event(profile, "gazetteer shadow: " + audit.get("reason", "hold"))
+        except Exception as exc:
+            logging.warning("Sullivan shadow audit unavailable (%s); hold unchanged", type(exc).__name__)
     reason = hit.get("hold_reason") or ""
     recoverable = reason in ("no nature", "no verified location", "ambiguous default borough",
                             "spoken crossing roads not verified") or reason.startswith("spoken cross unverified:")
