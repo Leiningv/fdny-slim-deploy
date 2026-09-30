@@ -65,6 +65,11 @@ def compare_weak_fdny(primary: dict, second_text: str) -> str:
 
 def generic_nature_invariant(transcript: str, nature: str) -> bool:
     """Safety invariant, independent of phrase extraction and review flags."""
+    # A named all-hands progress update is not a new activation.
+    if re.fullmatch(r"all hands", (nature or "").strip(), re.I) and re.search(
+            r"\b(?:progress report|reports?\s+(?:we(?: are|\x27re)?\s+)?(?:going to be\s+)?(?:dropping|scaling) down)\b",
+            transcript or "", re.I):
+        return True
     generic = re.fullmatch(r"(?:phone alarm|automatic alarm|fire alarm|alarm activation|class 3|fire|unknown|unknown problem)", (nature or "").strip(), re.I)
     if not generic: return False
     status = re.search(r"\b(?:completely evacuated|primary(?:\s+search)?(?:\s+is)?(?:\s+a)?\s+negative|leak(?:\s+is)?\s+under control)\b", transcript or "", re.I)

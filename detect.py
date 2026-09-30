@@ -1167,6 +1167,10 @@ def get_nature(text: str, profile: str = "") -> str:
             return "Medical Alert Activation"
     v = vt(r"\b(?:mva|mvc|motor vehicle accident|rollover|entrapment|car accident|auto accident|vehicle accident)\b")
     if v: return v
+    if profile == "hatzolah":
+        v = vt(r"\bnasal obstruction\b")
+        if v and re.search(r"\b(?:child|patient|male|female)\b", t):
+            return v
     v = vt(r"difficulty breathing|trouble breathing|shortness of breath|can't breathe|cant breathe|cannot breathe|not breathing|respiratory distress|turning blue")
     if v: return v
     v = vt(r"\b(?:cardiac arrest|heart attack|full arrest|cpr in progress)\b")
@@ -1904,6 +1908,14 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         box = detect_box(low)
         if box and _FDNY_JOBISH_RE.search(low) and not _FDNY_SKIP_RE.search(low):
             addr = f"FDNY Box {box}, Brooklyn, NY"
+    if profile == "sullivan":
+        route_matches = list(re.finditer(r"\b(\d{1,5})\s+State Route\s+(\d{1,3}[A-Z]?)\b", t, re.I))
+        route_house = route_matches[0] if route_matches else None
+        route_primary = bool(route_house and len({(m[1], m[2].upper()) for m in route_matches}) == 1 and
+            not re.search(r"\b(?:cross|across|between|new call|another job)\b", t[:route_house.start()], re.I))
+        if route_primary and re.search(r"\b(?:BLS|ALS)\s+response\b", t, re.I):
+            addr = _with_area(f"{route_house[1]} State Route {route_house[2].upper()}", profile, t)
+            direct_pair = None
     directional_corner = _directional_numbered_corner(t) if profile == "hatzolah" else None
     if directional_corner:
         addr=_with_area(f"{directional_corner[0]} & {directional_corner[1]}",profile,t)
@@ -1923,7 +1935,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     # callout, not a place (Sullivan 6:11 post 9/28). Real streets carry a
     # type token; type-less names like 'Broadway' survive (no digit/'The').
     _T_ANY = (r"\b(?:street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
-              r"lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter)\b")
+              r"lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter|route)\b")
     if re.match(r"^(?:the\s+)?(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|"
                 r"place|pl|lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter)\s*$",
                 street_part, re.I):
