@@ -1611,6 +1611,12 @@ def fdny_suffixless_address(text: str) -> str:
     return value
 
 
+def fdny_clipped_cross_only(text: str) -> bool:
+    """A mid-readout cross cannot stand in for the missing incident street."""
+    return bool(re.match(r"^\s*(?:(?:street|st|avenue|ave|road|rd|place|pl|boulevard|blvd|parkway|pkwy)\s+)?off\s+(?:of\s+)?",
+                         text or "", re.I))
+
+
 def sullivan_numbered_jobs(text: str, profile: str) -> bool:
     """Explicit new numbered dispatches are not one address/complaint span.
 

@@ -1400,6 +1400,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     highway_area_exception = bool(area and hit.get("spoken_highway_area") == area and
                                   hit["address"].startswith(area + ", "))
 
+    if profile == "fdny" and detect.fdny_clipped_cross_only(hit.get("dispatch_source_text") or source_text):
+        hit["hold_reason"] = "FDNY clipped primary; only a cross street is heard"
+        stats.event(profile, "Held: " + hit["hold_reason"])
+        return "suppressed"
     if profile == "fdny":
         # A terminal readout glued to a letter avenue has no trustworthy house
         # split. A fuzzy map hit such as Atlantic Terminal cannot certify it.
