@@ -9,7 +9,8 @@ class AddressOnly(unittest.IsolatedAsyncioTestCase):
         hit = detect.analyze(phrase, 'zello-hatzalah')
         self.assertTrue(hit['area_defaulted'])
         self.assertEqual(hit['address'], '17th Ave & 55th St, Brooklyn, NY')
-        with (patch.object(main, '_intersection_point', new_callable=AsyncMock, return_value=point),
+        with (patch.object(main, '_hatzalah_point_area', new_callable=AsyncMock, return_value='Brooklyn'),
+              patch.object(main, '_intersection_point', new_callable=AsyncMock, return_value=point),
               patch('locality_gate.default_area_safe', new_callable=AsyncMock, return_value=False) as old_gate,
               patch.object(main, '_cross_streets', new_callable=AsyncMock, return_value=(None,False)),
               patch.object(main, '_map_street_names', new_callable=AsyncMock, return_value=set()),

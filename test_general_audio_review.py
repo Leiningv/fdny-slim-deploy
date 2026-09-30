@@ -74,7 +74,8 @@ class Workflow(unittest.IsolatedAsyncioTestCase):
         self.assertIn('stale',reason);ear.assert_not_awaited()
     async def test_prepare_mode_never_sends(self):
         h=detect.analyze('Any units to 17 and 55 for a trauma?','zello-hatzalah')
-        with (patch.object(main,'_intersection_point',new_callable=AsyncMock,return_value=(40.63,-73.99)),
+        with (patch.object(main,'_hatzalah_point_area',new_callable=AsyncMock,return_value='Brooklyn'),
+              patch.object(main,'_intersection_point',new_callable=AsyncMock,return_value=(40.63,-73.99)),
               patch.object(main,'_cross_streets',new_callable=AsyncMock,return_value=(None,False)),
               patch.object(main,'_map_street_names',new_callable=AsyncMock,return_value=set()),
               patch.object(main.control,'muted_feeds',return_value=set()),

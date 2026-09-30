@@ -56,3 +56,26 @@ class ReviewDelivery(unittest.IsolatedAsyncioTestCase):
               patch.object(main.alert_waha, 'send_text', new_callable=AsyncMock) as send):
             await main._post_held_review('fdny', {'hold_reason':'terminal hold'}, 'clip.wav')
             send.assert_not_awaited()
+
+class PriorityDelivery(unittest.IsolatedAsyncioTestCase):
+    async def test_priority_option_is_deduped_and_owner_only(self):
+        import time
+        hit={'captured_ts':time.time(),'nature':'Unresponsive','address':'Dunbar & Mott Avenue, Queens, NY','hold_reason':'no verified location','voice_url':'https://example.invalid/audio'}
+        with (patch.dict(main.os.environ, {'HELD_REVIEW_ROUTE':'priority_owner_dm','HELD_REVIEW_OWNER_CHAT_ID':'19293781556@c.us'}),
+              patch.object(main,'_PRIORITY_HOLD_NOTIFIED',{}),
+              patch.object(main.alert_waha,'send_text',new_callable=AsyncMock,return_value=True) as send):
+            await main._post_held_review('zello-hatzalah',hit,'clip.wav');await main._post_held_review('zello-hatzalah',hit,'clip.wav')
+            send.assert_awaited_once();self.assertEqual(send.await_args.kwargs['chat_id'],'19293781556@c.us')
+            self.assertIn('HELD - NOT POSTED',send.await_args.args[0])
+    async def test_nonpriority_never_notified(self):
+        with (patch.dict(main.os.environ, {'HELD_REVIEW_ROUTE':'priority_owner_dm','HELD_REVIEW_OWNER_CHAT_ID':'19293781556@c.us'}),
+              patch.object(main.alert_waha,'send_text',new_callable=AsyncMock) as send):
+            await main._post_held_review('fdny',{'nature':'Automatic Alarm','hold_reason':'excluded'},'clip.wav')
+            send.assert_not_awaited()
+    async def test_priority_stale_or_missing_time_never_notified(self):
+        import time
+        with (patch.dict(main.os.environ, {'HELD_REVIEW_ROUTE':'priority_owner_dm','HELD_REVIEW_OWNER_CHAT_ID':'19293781556@c.us'}),
+              patch.object(main.alert_waha,'send_text',new_callable=AsyncMock) as send):
+            for captured in (0,time.time()-main.FRESH_LIVE_SEC-1):
+                await main._post_held_review('zello-hatzalah',{'nature':'Unresponsive','captured_ts':captured,'hold_reason':'map'},'clip.wav')
+            send.assert_not_awaited()

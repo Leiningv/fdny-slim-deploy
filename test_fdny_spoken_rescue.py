@@ -43,7 +43,7 @@ class SpokenDispatchRegression(unittest.TestCase):
              "Phone alarm box 586, 440 Atlantic Avenue, Nevins Street to Bond "
              "Street, odor of smoke, first floor.")
         h = detect.analyze(t, "fdny")
-        self.assertEqual(h["nature"], "Odor of Smoke")
+        self.assertEqual(h["nature"], "Odor of Smoke, First Floor")
         self.assertEqual(h["address"], "440 Atlantic Avenue, Brooklyn, NY")
         self.assertNotEqual(detect.get_nature(t.replace("odor of smoke", "no odor of smoke"),
                                                "fdny"), "Odor of Smoke")

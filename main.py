@@ -590,6 +590,42 @@ _OVERPASS_EPS = ("https://overpass-api.de/api/interpreter",
                  "https://overpass.private.coffee/api/interpreter")
 
 
+async def _hatzalah_point_area(lat: float, lon: float, address: str, defaulted: bool = False) -> str:
+    """A shared map junction must belong to the named service area.
+    A default Brooklyn label is a search hint, not evidence of borough.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://nominatim.openstreetmap.org/reverse",
+                params={"lat": lat, "lon": lon, "format": "jsonv2", "addressdetails": 1},
+                headers={"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"},
+                timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status != 200:
+                    return ""
+                payload = await response.json()
+        area = payload.get("address") or {}
+        county = area.get("county") or ""
+        borough = {"Kings County":"Brooklyn", "Queens County":"Queens",
+                   "New York County":"Manhattan", "Bronx County":"Bronx",
+                   "Richmond County":"Staten Island"}.get(county, "")
+        requested = address.split(",")[1].strip() if "," in address else ""
+        if address.endswith(", NJ"):
+            if county != "Bergen County": return ""
+            names = [str(area.get(k) or "") for k in ("town", "city", "village", "hamlet")]
+            return requested if any(n.casefold() == requested.casefold() for n in names) else ""
+        if requested not in ("Brooklyn", "Queens", "Manhattan", "Bronx", "Staten Island"):
+            names = [str(area.get(k) or "") for k in ("town", "city", "village", "hamlet", "suburb")]
+            if county in ("Nassau County", "Sullivan County") and any(n.casefold() == requested.casefold() for n in names):
+                return requested
+            if requested == "Riverdale" and borough == "Bronx":
+                return "Bronx"
+            return ""
+        if not defaulted and requested != borough:
+            return ""
+        return borough
+    except Exception:
+        return ""
+
 async def _intersection_point(address: str, cross: str) -> tuple:
     """Bare-street verification: the heard street truly crosses a spoken cross
     street (shared OSM way node) -> (lat, lon) of a shared node, else
@@ -598,7 +634,7 @@ async def _intersection_point(address: str, cross: str) -> tuple:
     parts = [p.strip() for p in (cross or "").split("&", 1) if p.strip()]
     if not street or not parts:
         return None, None
-    _T = r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln|Parkway|Pkwy|Court|Ct|Terrace|Ter)"
+    _T = r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln|Parkway|Pkwy|Court|Ct|Terrace|Ter|Expressway|Expy)"
     # A dispatcher may omit the first suffix ("Coleridge and Hampton Avenue").
     # Try plausible typed variants; verify by an ACTUAL shared OSM node,
     # rather than trusting a fuzzy hit on the second street alone.
@@ -1299,12 +1335,29 @@ def _held_review_text(profile: str, hit: dict) -> str:
     return f"*Held {source} call - please check the recording*\n{heard} {uncertainty} {question}"
 
 
+def _priority_hold_text(profile: str, hit: dict) -> str:
+    nature = (hit.get("nature") or "").strip()
+    if not re.search(r"\b(?:not breathing|unresponsive|unconscious|cardiac|cardiac arrest|CPR)\b", nature, re.I):
+        return ""
+    source = profile.removeprefix("zello-")
+    source = "Hatzalah" if source in ("hatzalah", "hatzolah") else source.upper()
+    # A default borough is not heard evidence. Omit it from the held read.
+    location = (hit.get("address") or "location unclear").split(",", 1)[0]
+    return (f"HELD - NOT POSTED | {source}\n"
+            f"Parsed from radio: {nature} | {location}\n"
+            f"Hold: {hit.get('hold_reason') or 'unverified'}\n"
+            f"Recording: {hit.get('voice_url') or 'unavailable'}")
+
+_PRIORITY_HOLD_NOTIFIED: dict[str, float] = {}
+
 async def _post_held_review(profile: str, hit: dict, clip_name: str | None) -> None:
     """Owner-only terminal hold notification. Default is saved/report-only."""
     reason = (hit.get("hold_reason") or "").strip()
     if not reason or reason in _REVIEW_SKIP:
         return
-    if os.environ.get("HELD_REVIEW_ROUTE", "report_only") != "owner_dm":
+    route = os.environ.get("HELD_REVIEW_ROUTE", "report_only")
+    if route not in ("owner_dm", "priority_owner_dm"):
+
         logging.info("held review saved; notification route=report_only")
         return
     # The approved person is fixed; a group or arbitrary destination is never
@@ -1312,6 +1365,22 @@ async def _post_held_review(profile: str, hit: dict, clip_name: str | None) -> N
     chat = os.environ.get("HELD_REVIEW_OWNER_CHAT_ID", "").strip()
     if chat != "19293781556@c.us":
         logging.warning("held review owner destination missing or not permitted")
+        return
+    if route == "priority_owner_dm":
+        captured = float(hit.get("captured_ts") or 0)
+        if not captured or not 0 <= time.time() - captured <= FRESH_LIVE_SEC:
+            return
+        text = _priority_hold_text(profile, hit)
+        if not text:
+            return
+        key = profile + "|" + hit.get("nature", "") + "|" + hit.get("address", "")
+        if time.time() - _PRIORITY_HOLD_NOTIFIED.get(key, 0) < 600:
+            return
+        if await alert_waha.send_text(text, chat_id=chat):
+            _PRIORITY_HOLD_NOTIFIED[key] = time.time()
+            for old_key, notified in list(_PRIORITY_HOLD_NOTIFIED.items()):
+                if time.time() - notified > 600:
+                    _PRIORITY_HOLD_NOTIFIED.pop(old_key, None)
         return
     box = hit.get("box_heard") or "no box"
     recording = hit.get("voice_url") or "recording unavailable"
@@ -1391,7 +1460,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     now = time.time()
     verify_started = time.monotonic()
     from highway_area import spoken_area
-    source_text = (source_call or {}).get("transcription") or hit.get("excerpt") or ""
+    source_text = hit.get("dispatch_source_text") or (source_call or {}).get("transcription") or hit.get("excerpt") or ""
     if detect.sullivan_numbered_jobs(hit.get("dispatch_source_text") or source_text, profile):
         hit["hold_reason"] = "Sullivan numbered dispatch jobs; complaint/address pairing unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
@@ -1429,7 +1498,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             stats.event(profile, "Held: " + hit["hold_reason"])
             return "suppressed"
         import fdny_audio_gate
-        source_text = (source_call or {}).get("transcription") or hit.get("excerpt") or ""
+        source_text = hit.get("dispatch_source_text") or (source_call or {}).get("transcription") or hit.get("excerpt") or ""
         if fdny_audio_gate.generic_nature_invariant(source_text, hit.get("nature", "")):
             hit["hold_reason"] = "FDNY generic nature conflicts with specific complaint/escalation evidence; terminal hold"
             stats.event(profile, "Held: " + hit["hold_reason"])
@@ -1523,6 +1592,19 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         grid_point = await _hatzalah_brooklyn_grid_corridor(hit)
         if grid_point is not None:
             hit["verified_brooklyn_grid_point"] = grid_point
+        if not grid_point and " & " not in hit["address"].split(",")[0]:
+            # A default suffix must not veto a uniquely mapped spoken road
+            # outside Brooklyn. Neutral exact-road search first; the normal
+            # map and service-area gates still verify the revised candidate.
+            import locality_gate
+            core = hit["address"].split(",", 1)[0]
+            match = re.match(r"^(\d{1,5})\s+(.+)$", core)
+            boroughs = await locality_gate.plausible_boroughs(match[2] if match else core,
+                                                            match[1] if match else "")
+            if boroughs and len(boroughs) == 1:
+                mapped_area = next(iter(boroughs))
+                if mapped_area in ("Brooklyn", "Queens", "Bronx", "Manhattan", "Staten Island"):
+                    hit["address"] = f"{core}, {mapped_area}, NY"
     if profile == "fdny" and re.search(r"\b\d+(?:st|nd|rd|th)\s+Walk,", hit["address"], re.I):
         # A reused overlapping clip may contain a separate numbered street
         # job and a box for THAT job, then repeat a Walk address. Never tie
@@ -1606,6 +1688,12 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             side_a, side_b = (p.strip() for p in spoken_location.split("&", 1))
             lat, lon = await _intersection_point(hit["address"], side_b)
             verified = lat is not None
+            if verified and profile.lower().removeprefix("zello-") in ("hatzolah", "hatzalah"):
+                mapped_area = await _hatzalah_point_area(lat, lon, hit["address"], bool(hit.get("area_defaulted")))
+                if not mapped_area:
+                    verified = False
+                else:
+                    hit["address"] = re.sub(r",\s*[^,]+,\s*(NY|NJ)$", f", {mapped_area}, " + ("NJ" if hit["address"].endswith(", NJ") else "NY"), hit["address"])
             # Spatially constrained road-name intersection. If map service
             # is unavailable, verified stays false and alert is suppressed.
             verified_label = hit["address"] if verified else ""
@@ -1691,6 +1779,13 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                     _intersection_point(hit["address"], direct_candidate), timeout=9)
             except Exception:
                 pair_point = (None, None)
+        if pair_point[0] is not None:
+            mapped_area = await _hatzalah_point_area(*pair_point, hit["address"], bool(hit.get("area_defaulted")))
+            if not mapped_area:
+                pair_point = (None, None)
+            else:
+                hit["address"] = re.sub(r",\s*[^,]+,\s*(NY|NJ)$", f", {mapped_area}, " + ("NJ" if hit["address"].endswith(", NJ") else "NY"), hit["address"])
+                locality = mapped_area
         if pair_point[0] is not None:
             hit["address"] = hit["address"].replace(
                 hit["address"].split(",", 1)[0],
@@ -2246,6 +2341,8 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         lines.append(hit["place"])
     if crosses:
         lines.append(f"C/s {crosses}")
+    if not box and (hit.get("source") or "") == "fdny" and hit.get("box_heard"):
+        lines.append(f"Box {hit['box_heard']} (heard; location not corroborated)")
     if box:
         line = f"Box {box}"
         if box_closest:
@@ -2465,6 +2562,10 @@ async def ptt_consumer(profile: str, stats: Stats, seen: dict) -> None:
                 nature = (hit or {}).get("nature", "")
                 matched = None
                 for rec in pending:
+                    # A mixed-request recording cannot absorb a later repeat
+                    # using its first location as the grouping identity.
+                    if len(detect.split_dispatch_jobs(text, profile)) > 1 or len(detect.split_dispatch_jobs(rec["text"], profile)) > 1:
+                        continue
                     if _ptt_group_match(rec, started, addr, gap, nature):
                         matched = rec;break
                 if matched:
@@ -2515,6 +2616,7 @@ async def ptt_consumer(profile: str, stats: Stats, seen: dict) -> None:
                     ok=outcome=="sent"
                     if outcome=="suppressed":
                         hit["voice_url"]=await _held_recording(clip_name)
+                        hit["captured_ts"] = rec["start"]
                         await _post_held_review(profile, hit, clip_name)
                     stats.mark_alert(profile,hit["nature"],hit["address"],ok,
                                      voice_url=hit.get("voice_url",""),failed=(outcome=="queued"),
@@ -2614,6 +2716,7 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
                 ok = outcome == "sent"
                 if outcome == "suppressed":
                     hit["voice_url"] = await _held_recording(clip_name)
+                    hit["captured_ts"] = mtime
                     await _post_held_review(profile, hit, clip_name)
                 stats.mark_alert(profile, hit["nature"], hit["address"], ok,
                                  voice_url=hit.get("voice_url", ""),
@@ -3022,6 +3125,14 @@ async def _fdny_audio_review(call: dict, original: dict | None, stats,
 async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                             send_lock: asyncio.Lock | None = None,
                             correction_guard: CorrectionGuard | None = None) -> None:
+    if not call.get("_request_scoped"):
+        spans = detect.split_dispatch_jobs(str(call.get("transcription") or ""), "fdny")
+        if len(spans) > 1:
+            for index, span in enumerate(spans):
+                scoped = dict(call, transcription=span, _request_scoped=True,
+                              id=str(call.get("id") or call.get("filename") or int(time.time())) + f"-request-{index}")
+                await _fdny_handle_call(scoped, stats, seen, tmp, send_lock, correction_guard)
+            return
     stats.mark_segment("fdny")
     cid = str(call.get("id") or call.get("filename") or int(time.time()))
     text = (call.get("transcription") or "").strip()
@@ -3123,6 +3234,9 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             stats.event("fdny", "Held: " + why)
         _fdny_call_record(call, text, clip_name, None, "skipped", "no parsed incident")
         return
+    # Verification and detail checks must use the same isolated request
+    # that produced this candidate, not the preceding unit update.
+    text = hit.get("dispatch_source_text") or text
     key = f"fdny|{hit['nature']}|{hit['address']}"
     now = time.time()
     if now - seen.get(key, 0) < DEDUP_SEC:
@@ -3262,6 +3376,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
         if published:
             hit["voice_url"] = published
             stats.update_alert_recording("fdny", nature, address, audio_ref, published)
+        hit["captured_ts"] = float(call.get("ts") or 0)
         await _post_held_review("fdny", hit, clip_name)
         return
     try:
@@ -3299,6 +3414,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
         if published:
             hit["voice_url"] = published
             stats.update_alert_recording("fdny", hit["nature"], hit["address"], audio_ref, published)
+        hit["captured_ts"] = float(call.get("ts") or 0)
         await _post_held_review("fdny", hit, clip_name)
     logging.info("[fdny] ALERT %s @ %s - sent=%s", hit["nature"], hit["address"], ok)
 

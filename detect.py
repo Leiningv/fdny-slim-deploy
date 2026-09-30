@@ -96,6 +96,8 @@ def get_hatzolah_area(text: str) -> str:
     t = text.lower()
     if _rego_saunders_corner(text):
         return "Queens"
+    if re.search(r"\b(?:in|for|near|at)\s+Bayswater\b|\bBayswater\s+for\b", text, re.I):
+        return "Queens"
     if re.search(r"\b(?:west\s*side|manhattan)\b",t) and not re.search(r"\bmanhattan beach\b",t):
         return "Manhattan"
     # This complete spoken Beach-number/Rockaway pair is a Queens location,
@@ -648,7 +650,7 @@ def extract_direct_street_pair(text: str) -> tuple[str, str] | None:
             while ws and ws[0].lower() in _NAME_STOP:
                 ws.pop(0)
             return " ".join(ws)
-        a, b = clean(a), clean(b)
+        a, b = _hatzalah_clean_road(clean(a)), clean(b)
         # A regex span starting at an action word is not a road name:
         # "respond to 13th avenue" must remain "13th avenue".
         a = re.sub(r"^(?:respond|responding|dispatch|units?)\s+(?:to\s+)?", "", a, flags=re.I)
@@ -819,6 +821,12 @@ _LONE_STREET_RE = re.compile(
 
 def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None:
     """Best-effort dispatch location for one transcript chunk."""
+    if profile in ("hatzolah", "hatzalah"):
+        short_house = re.search(r"\b(\d{3,5})\s+(East|West|North|South)\s+(\d{1,3})(?:st|nd|rd|th)?(?=\s*[,.;]|\s+for\b)", text, re.I)
+        if short_house and (get_nature(text[short_house.start():], "hatzolah") or re.search(r"\bprivate house\b", text[short_house.end():], re.I)):
+            n = int(short_house.group(3))
+            suffix = "th" if 11 <= n % 100 <= 13 else {1:"st",2:"nd",3:"rd"}.get(n % 10,"th")
+            return _with_area(f"{short_house.group(1)} {short_house.group(2).title()} {n}{suffix} Street", profile, text)
     if profile == "fdny":
         # Queens hyphenated house numbers are indivisible, never the suffix
         # alone (159-22 is a building number, not a radio run plus 22).
@@ -1095,9 +1103,17 @@ def get_nature(text: str, profile: str = "") -> str:
     cleaned. Returns the matched phrase ('' when nothing is discernible).
     Cascade order is unchanged: content natures beat transmission types."""
     t = text.lower()
+    if profile == "fdny":
+        # Observed Madison ASR "order of gas" stands for odor only inside
+        # a complete job-local complaint. No global order/odor replacement.
+        boxes = {m[1].zfill(4) for m in re.finditer(r"\bbox\s+(\d{2,4})\b", t)}
+        if len(boxes) == 1:
+            m = re.search(r"\border of gas\s+in\s+(?:the\s+)?(?:basement|cellar|area)\b", t)
+            if m and not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$", t[max(0,m.start()-35):m.start()]):
+                return "Odor of Gas" + (", Basement" if "basement" in m[0] else ", Cellar" if "cellar" in m[0] else ", In the Area")
     # Retain the exact observed complaint, never a diagnosis or facility name.
     exact = (r"\bpediatric emergency\b" if profile == "hatzolah" else
-             r"\boven fire\b" if profile == "fdny" else "")
+             r"\b(?:oven|stove) fire\b" if profile == "fdny" else "")
     if exact:
         m = re.search(exact, t)
         if m:
@@ -1204,10 +1220,17 @@ def get_nature(text: str, profile: str = "") -> str:
                         r"(?:street|st|road|rd|avenue|ave|drive|dr)\b", t)
         if mva:
             return _addr_title(mva.group(1))
-        alert = re.search(r"\b(?:for\s+)?(?:a\s+)?medical alert activation\b", t)
+        alert = re.search(r"\b(?:medical alert activation|activated medical alert)\b", t)
         if alert and not re.search(r"\b(?:test|testing|training|cancelled|canceled)\b"
                                   r"|\b(?:no|not|negative)\s+(?:a\s+)?medical alert", t):
             return "Medical Alert Activation"
+    if profile == "sullivan":
+        pump = re.search(r"\bcellar pump[ -]?out\b", t)
+        if pump and not re.search(r"\b(?:no|not|test|training|drill)\s+(?:\w+\s+){0,2}$", t[max(0,pump.start()-30):pump.start()]):
+            return "Cellar Pump-Out"
+        injury = re.search(r"\bknee injury\b", t)
+        if injury and not re.search(r"\b(?:no|not|negative|test|training|drill)\s+(?:\w+\s+){0,2}$", t[max(0,injury.start()-35):injury.start()]):
+            return _addr_title(injury.group())
     v = vt(r"\b(?:mva|mvc|motor vehicle accident|rollover|entrapment|car accident|auto accident|vehicle accident)\b")
     if v: return v
     if profile == "hatzolah":
@@ -1616,6 +1639,10 @@ def extract_apartment(text: str) -> str:
     # ASR punctuation is a separator, not part of a spoken apartment ID.
     # Stay inside the explicit apartment phrase and existing phonetic map.
     t = re.sub(r"(\b(?:apartment|apt)s?)\s*,\s*", r"\1 ", t)
+    numbers = {"one":"1", "two":"2", "three":"3", "four":"4", "five":"5",
+               "six":"6", "seven":"7", "eight":"8", "nine":"9"}
+    t = re.sub(r"\b(apartment|apt)\s+(one|two|three|four|five|six|seven|eight|nine)\b",
+               lambda m: m[1] + " " + numbers[m[2]], t)
     t = re.sub(r"(\b(?:apartment|apt)s?\s+\d{1,3})\s*,\s*", r"\1 ", t)
     m = re.search(r"\b(?:apartment|apt)s?\s+(\d{1,3})\s+([a-z][a-z\-]+)\b", t)
     if m and m.group(2) in _PHONETIC:
@@ -1654,6 +1681,52 @@ def fdny_suffixless_address(text: str) -> str:
     return value
 
 
+def fdny_spoken_road_pair(text: str) -> tuple[str, str] | None:
+    """A single-box bare-road dispatch, never an inferred house/cross."""
+    boxes = {m[1].zfill(4) for m in re.finditer(r"\bbox\s+(\d{2,4})\b", text, re.I)}
+    if len(boxes) != 1:
+        return None
+    road = r"(?:East|West|North|South)\s+\d{1,3}(?:st|nd|rd|th)?\s+(?:Street|St)"
+    second = r"(?:[A-Za-z][A-Za-z'-]*\s+){1,3}(?:Avenue|Ave|Street|St|Parkway|Pkwy)"
+    matches = list(re.finditer(r"\bbox\s+\d{2,4}\s*[,;]?\s*(?:it'?s\s+)?("+road+r")\s*(?:,|and|&)\s*(?:the\s+)?("+second+r")\s*[,;]", text, re.I))
+    pairs = {(_addr_title(m[1]),_addr_title(m[2])) for m in matches}
+    return next(iter(pairs)) if len(pairs) == 1 else None
+
+
+def fdny_request_text(text: str) -> str:
+    """Isolate a complete dispatch from preceding unit chatter/fragments.
+    Distinct complete box dispatches remain unsplit and fail closed.
+    """
+    normalized = _split_box_glue(_norm(text))
+    openers = list(re.finditer(r"\b(?:phone\s+alarm\s+)?box\s*[,;:]?\s*(\d{3,4})\s*[,;:]?\s+(?=\d{1,5}\s+)", normalized, re.I))
+    if not openers:
+        # Observed Calls transcription can omit the word Box. Require the
+        # same four-digit dispatch ID and full house/road repeated twice,
+        # following an explicit completed-unit update, never a lone number.
+        repeat = list(re.finditer(r"\b(\d{4})\s+(\d{1,5}\s+(?:East|West|North|South)?\s*\d{1,3}(?:st|nd|rd|th)?\s+Street)\b", normalized, re.I))
+        if len(repeat) >= 2 and len({(m[1],m[2].casefold()) for m in repeat}) == 1:
+            prefix = normalized[:repeat[0].start()]
+            tail = normalized[repeat[0].start():]
+            if re.search(r"\bno extension\b", prefix, re.I) and get_nature(tail, "fdny"):
+                return tail
+        return text
+    if len({m.group(1).zfill(4) for m in openers}) != 1:
+        return text
+    first = openers[0]
+    tail = normalized[first.start():]
+    if not extract_dispatch_address(tail, "fdny") or not get_nature(tail, "fdny"):
+        return text
+    prefix = normalized[:first.start()]
+    if re.search(r"\b(?:Queens|Bronx|Manhattan|Staten Island)\b", prefix, re.I):
+        return text
+    if re.search(r"\b\d{1,5}\s+(?:[A-Za-z][A-Za-z'-]*\s+){0,3}(?:Street|Avenue|Road|Place|Lane)\b", prefix, re.I):
+        return text
+    if first.start() and (fdny_clipped_cross_only(prefix) or re.search(
+            r"\b(?:10[- ]?26|no extension|units in the process|to Brooklyn|responding)\b", prefix, re.I)):
+        return tail
+    return text
+
+
 def fdny_clipped_cross_only(text: str) -> bool:
     """A mid-readout cross cannot stand in for the missing incident street."""
     return bool(re.match(r"^\s*(?:(?:street|st|avenue|ave|road|rd|place|pl|boulevard|blvd|parkway|pkwy)\s+)?off\s+(?:of\s+)?",
@@ -1679,6 +1752,44 @@ def split_dispatch_jobs(text: str, profile: str) -> list[str]:
     from the same span. A leading partial job is kept independently, rather
     than glued to a later complete dispatch.
     """
+    if profile == "fdny":
+        if re.search(r"\bbox\s+\d{5,}\b", text, re.I):
+            return [text]  # ambiguous glued runs must retain their original guard
+        normalized = _split_box_glue(_norm(text))
+        openers = list(re.finditer(r"\b(?:phone\s+alarm\s+)?box\s*[,;:]?\s*(\d{3,4})\b", normalized, re.I))
+        boxes = {m.group(1).zfill(4) for m in openers}
+        if len(boxes) < 2:
+            return [fdny_request_text(text)]
+        prefix = normalized[:openers[0].start()]
+        if re.search(r"\b\d{1,5}\s+(?:[A-Za-z][A-Za-z'-]*\s+){0,3}(?:Street|Avenue|Road|Place|Lane)\b", prefix, re.I):
+            return [text]
+        bounds = [m.start() for m in openers] + [len(normalized)]
+        spans = [normalized[a:b].strip() for a,b in zip(bounds,bounds[1:])]
+        # Only split complete numbered, typed-road dispatches. A missing
+        # complaint stays held, never borrowing another span's complaint.
+        for span in spans:
+            address = extract_dispatch_address(span, "fdny") or ""
+            nature = get_nature(span, "fdny")
+            if not re.match(r"^\d{1,5}\s+", address) or not nature or re.fullmatch(r"phone alarm|fire alarm|class 3", nature, re.I):
+                return [text]
+        # Borough/unit prefixes between jobs cannot be silently dropped.
+        if re.search(r"\b(?:Queens|Bronx|Manhattan|Staten Island)\b", normalized, re.I):
+            return [text]
+        return spans
+    if profile.removeprefix("zello-") in ("hatzolah", "hatzalah"):
+        # A complete earlier street-pair request cannot donate its location
+        # to a later numbered-house complaint. Split only on explicit house
+        # plus directional numbered-road evidence, never bare crew numbers.
+        bounds = [0]
+        house = re.compile(r"\b\d{3,5}\s+(?:East|West|North|South)\s+\d{1,3}(?:st|nd|rd|th)?\b", re.I)
+        for m in house.finditer(text or ""):
+            prefix = text[bounds[-1]:m.start()]
+            tail = text[m.end():]
+            earlier = extract_direct_street_pair(prefix) or _hatzalah_dispatch_corner(prefix) or extract_audio_crosses(prefix)
+            if earlier and re.search(r"\b(?:for|units? available|available for)\b", prefix, re.I) and get_nature(tail, "hatzolah"):
+                bounds.append(m.start())
+        bounds.append(len(text))
+        return [text[a:b].strip(" .,\n") for a,b in zip(bounds,bounds[1:]) if text[a:b].strip(" .,\n")]
     if profile.removeprefix("zello-") != "sullivan":
         return [text]
     openers = list(re.finditer(
@@ -1759,12 +1870,26 @@ def _hatzalah_location_text(text: str) -> str:
                   "member", text, flags=re.I)
 
 
+def _hatzalah_clean_road(road: str) -> str:
+    road = road.strip()
+    tokens = road.split()
+    while tokens and tokens[0].lower() in _NAME_STOP:
+        tokens.pop(0)
+    road = " ".join(tokens)
+    for place in list(BERGEN_AREAS) + list(FIVE_TOWNS_AREAS) + ["Bayswater", "Crown Heights"]:
+        road = re.sub(r"^" + re.escape(place) + r"\s+(?:for|at|on|to)\s+", "", road, flags=re.I)
+    road = re.sub(r"^(?:any units|units|in|for|at|on|to)\s+", "", road, flags=re.I)
+    return road
+
 def _hatzalah_dispatch_corner(text: str):
     """First explicit named corner, ahead of later member routing readouts.
 
     A bare second road remains a candidate, never a claimed full road name;
     the sender must map-check both sides before publishing the intersection.
     """
+    highway = re.search(r"\b([A-Za-z][A-Za-z'-]*\s+(?:Boulevard|Blvd|Avenue|Ave|Street|St|Road|Rd))\s+(?:and|at|&)\s+(?:the\s+)?([A-Za-z][A-Za-z'-]*\s+(?:Expressway|Parkway))\b", text, re.I)
+    if highway:
+        return _addr_title(highway[1]), _addr_title(highway[2])
     beach = re.search(r"\b(Rockaway Beach (?:Boulevard|Blvd))\s+(?:and|at|&)\s+(Beach\s+\d{1,3}(?:st|nd|rd|th)?)(?:\s+(?:Street|St))?\b", text, re.I)
     if beach:
         return _addr_title(beach[1]), _addr_title(beach[2])
@@ -1780,7 +1905,7 @@ def _hatzalah_dispatch_corner(text: str):
     # Do not eat a responding person's label or dispatch filler as a road.
     if any(w.lower() in _NAME_STOP or w.lower()=='member' for w in b.split()):
         return None
-    a=re.sub(r"^(?:Crown Heights|any units|units to|units in|in|for|at|on)\s+", "", a, flags=re.I)
+    a = _hatzalah_clean_road(a)
     return _addr_title(a), _addr_title(b)
 
 
@@ -1889,6 +2014,8 @@ def extract_repeated_bare_cross(text: str, addr: str) -> str:
 def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     """Return an alert dict, or None when this chunk should not alert."""
     source = profile
+    if profile == "fdny":
+        text = fdny_request_text(text)
     profile = profile.removeprefix("zello-")  # zello-* reuses base grammar
     if profile == "hatzalah":  # source label spelling -> grammar spelling
         profile = "hatzolah"
@@ -1916,6 +2043,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
             t, flags=re.I)
     terminal_street = None
     raw_input = _norm(text)
+    if profile == "sullivan":
+        t = re.sub(r"\bnumber\s+(\d{1,5})\s+(?=[A-Za-z]+(?:\s+[A-Za-z]+){0,2}\s+(?:Lane|Street|Road|Drive|Place)\b)", r"\1 ", t, flags=re.I)
     if profile == "fdny":
         # A terminal ID is not a street. Strip the ID and leave a bare
         # Street fragment; only independent box+cross evidence can recover
@@ -2046,7 +2175,11 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         unnumbered_before_cross = re.search(
             r"\b([A-Z][a-zA-Z'-]*(?:\s+[A-Z][a-zA-Z'-]*){0,2}\s+"
             r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln))\s+between\b", t)
-    if terminal_street:
+    sullivan_house = extract_dispatch_address(t, profile) if profile == "sullivan" else ""
+    if sullivan_house and re.match(r"^\d{1,5}\s+", sullivan_house):
+        addr = sullivan_house
+        direct_pair = None  # following cross pair is not the incident address
+    elif terminal_street:
         addr = _with_area(terminal_street, profile, t)
     elif numbered_before_cross:
         addr = extract_dispatch_address(t, profile)
@@ -2066,8 +2199,11 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         addr = _with_area(spoken_pair, profile, t)
     else:
         addr = extract_dispatch_address(t, profile)
+    fdny_road_pair = fdny_spoken_road_pair(t) if profile == "fdny" else None
+    if fdny_road_pair:
+        addr = _with_area(" & ".join(fdny_road_pair), profile, t)
     from highway_area import spoken_area
-    highway_location = spoken_area(t) if profile == "fdny" else ""
+    highway_location = spoken_area(t) if profile == "fdny" and not fdny_road_pair else ""
     if highway_location:
         addr = _with_area(highway_location, profile, t)
     suffixless = fdny_suffixless_address(t) if profile == "fdny" else ""
@@ -2218,8 +2354,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                        r"\d+(?:st|nd|rd|th))\s+floors\b", t, re.I)
         if mf and "floors" not in nature.lower():
             nature += f", {mf.group(1).title()} and {mf.group(2).title()} Floors"
-    fl = re.search(r"\bthe\s+((?:first|second|third|fourth|fifth|sixth|"
-                   r"seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th))\s+floor)\b", t)
+    fl = re.search(r"\b(?:the\s+)?((?:first|second|third|fourth|fifth|sixth|"
+                   r"seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th))\s+floor)\b", t, re.I)
     if fl and nature and fl.group(1).lower() not in nature.lower():
         nature = f"{nature}, {_addr_title(fl.group(1))}"
     # Dispatcher's explicit "time now is 1610" is a clock readout, not a
@@ -2277,6 +2413,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     if highway_location:
         cross = ""  # Area/exit road is already on the location line, not a C/s.
     return {
+        "fdny_spoken_road_pair": fdny_road_pair,
         "spoken_highway_area": highway_location,
         "spoken_time": spoken_time,
         "source": source,
