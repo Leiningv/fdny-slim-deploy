@@ -1588,6 +1588,19 @@ def fdny_suffixless_address(text: str) -> str:
     return value
 
 
+def sullivan_numbered_jobs(text: str, profile: str) -> bool:
+    """Explicit new numbered dispatches are not one address/complaint span.
+
+    A second page, second response, or single first-call repeat is not a new
+    incident boundary. Hold an explicit second/third call even when the first
+    opener is clipped. Do not try to choose one job from this recording.
+    """
+    if profile.removeprefix("zello-") != "sullivan":
+        return False
+    return bool(re.search(r"\b(?:second|third|fourth|2nd|3rd|4th)\s+(?:call|job)\b",
+                          text or "", re.I))
+
+
 def split_dispatch_jobs(text: str, profile: str) -> list[str]:
     """Split an overlapped Sullivan clip at a NEW dispatch opener, never at a
     repeat/second page within the same job. Nature and address must be read
@@ -2100,6 +2113,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "service_road_spoken": bool(re.search(
             r"\bGrand Central Parkway service road\b", t, re.I)),
         "excerpt": t[:280],
+        "dispatch_source_text": t,  # safety checks must not stop at the preview limit
         # box spoken anywhere in the chunk (the excerpt above truncates at
         # 280 chars - a late-spoken 'box NNNN' was missed and fell through
         # to the closest-box lookup)

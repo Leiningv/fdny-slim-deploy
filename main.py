@@ -1392,6 +1392,10 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     verify_started = time.monotonic()
     from highway_area import spoken_area
     source_text = (source_call or {}).get("transcription") or hit.get("excerpt") or ""
+    if detect.sullivan_numbered_jobs(hit.get("dispatch_source_text") or source_text, profile):
+        hit["hold_reason"] = "Sullivan numbered dispatch jobs; complaint/address pairing unverified"
+        stats.event(profile, "Held: " + hit["hold_reason"])
+        return "suppressed"
     area = spoken_area(source_text) if profile == "fdny" else ""
     highway_area_exception = bool(area and hit.get("spoken_highway_area") == area and
                                   hit["address"].startswith(area + ", "))
@@ -2319,7 +2323,7 @@ async def verify_zello_with_second_listen(profile: str, hit: dict, stats,
     import copy
     import audio_review
     original = copy.deepcopy(hit)
-    if audio_review.mixed(hit.get("excerpt") or "", profile):
+    if audio_review.mixed(hit.get("dispatch_source_text") or hit.get("excerpt") or "", profile):
         hit["hold_reason"] = "mixed dispatch addresses; complaint pairing unverified"
         return "suppressed", hit
     outcome = await verify_and_send(profile, hit, stats, clip_name, fresh_ts=fresh_ts,

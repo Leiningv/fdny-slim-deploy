@@ -21,6 +21,8 @@ def complaint_lost(text, nature):
     return fdny_audio_gate.unclassified_fire_complaint(text, nature)
 
 def mixed(text, profile):
+    if detect.sullivan_numbered_jobs(text, profile):
+        return True
     if profile == 'fdny':
         return len(set(re.findall(r'\bbox\s*[,;:]?\s*(\d{2,5})\b', text or '', re.I))) > 1
     # Brooklyn shorthand pairs can carry distinct medical calls in one PTT.
