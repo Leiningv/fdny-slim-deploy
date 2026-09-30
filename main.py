@@ -1397,6 +1397,14 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                                   hit["address"].startswith(area + ", "))
 
     if profile == "fdny":
+        # A terminal readout glued to a letter avenue has no trustworthy house
+        # split. A fuzzy map hit such as Atlantic Terminal cannot certify it.
+        terminal_letter = re.search(r"\bterminal\s+\d{4,}\s+(?:Avenue|Ave)\s+[A-Z]\b", source_text, re.I)
+        terminal_road = re.search(r"\bterminal\b", hit.get("address", ""), re.I)
+        if terminal_letter or terminal_road:
+            hit["hold_reason"] = "FDNY terminal readout/letter avenue has no independently resolved incident address"
+            stats.event(profile, "Held: " + hit["hold_reason"])
+            return "suppressed"
         import fdny_audio_gate
         source_text = (source_call or {}).get("transcription") or hit.get("excerpt") or ""
         if fdny_audio_gate.generic_nature_invariant(source_text, hit.get("nature", "")):
