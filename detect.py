@@ -1168,6 +1168,11 @@ def get_nature(text: str, profile: str = "") -> str:
     v = vt(r"\b(?:mva|mvc|motor vehicle accident|rollover|entrapment|car accident|auto accident|vehicle accident)\b")
     if v: return v
     if profile == "hatzolah":
+        # Preserve the explicit police dispatch request, with no injury claim.
+        for m in re.finditer(r"\bpd\s+requesting\s+jumper\s+down\b", t):
+            if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$",
+                             t[max(0,m.start()-40):m.start()]):
+                return _addr_title(m.group())
         # Explicit dispatch complaint, not a diagnosis inferred from routing.
         # A bare EDP unit label or mental-health training is not a complaint.
         for m in re.finditer(r"\b(?:edp|psych)\s+situation\b", t):
@@ -1268,7 +1273,7 @@ def get_nature(text: str, profile: str = "") -> str:
         if v: return v
     v = vt(r"\b(?:electrical|wires down|transformer)\b")
     if v: return v
-    v = vt(r"\belevator\b")
+    v = vt(r"\bstuck occupied elevator\b|\belevator\b")
     if v: return v
     if profile == "fdny":
         for pattern in [r"\bgas detector activation\b", r"\bgas alarm\b", r"\bboat in distress\b"]:
