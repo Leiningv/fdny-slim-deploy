@@ -148,11 +148,18 @@ def _archive_clip(src: Path, name: str) -> None:
         logging.warning("clip archive failed: %s", e)
         return
     try:
-        profile = name.rsplit("-", 1)[0]
+        profile = ("zello-hatzalah" if name.startswith("zello-hatzalah-") else
+                   "zello-sullivan" if name.startswith("zello-sullivan-") else
+                   "fdny" if name.startswith("fdny-") else name.rsplit("-", 1)[0])
         clips = sorted(ARCHIVE_DIR.glob(f"{profile}-*.wav"),
                        key=lambda p: p.stat().st_mtime, reverse=True)
-        for old in clips[ARCHIVE_KEEP:]:
-            old.unlink()
+        budget = int(os.environ.get("ARCHIVE_MAX_BYTES_PER_FEED", "100000000"))
+        used = 0
+        for index, old in enumerate(clips):
+            used += old.stat().st_size
+            if index >= ARCHIVE_KEEP or used > budget:
+                old.unlink()
+                old.with_suffix(".ogg").unlink(missing_ok=True)
     except Exception:  # noqa: BLE001
         pass
 
@@ -1338,7 +1345,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                             audio_ts: float | None = None, spoken_time: str = "",
                             send_lock: asyncio.Lock | None = None,
                             correction_guard: CorrectionGuard | None = None,
-                            source_call: dict | None = None) -> str:
+                            source_call: dict | None = None,
+                            prepare_only: bool = False) -> str:
     """User's posting rules (9/28): verified addresses only; Sullivan feed posts
     only Sullivan-County-verified addresses; unverifiable posts marked not confirmed.
     Returns 'sent' | 'queued' | 'suppressed'."""
@@ -1396,7 +1404,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if heard:
             box_task = asyncio.create_task(_box_lookup(heard))
     ogg_task = None
-    if clip_name:
+    if clip_name and not prepare_only:
         # Convert the voice note concurrently with geocode/canonicalization so
         # text and audio can post back-to-back (user rule 9/28: "Job has to be
         # posted same second as audio"). Conversion is ~1-2s, verification is
@@ -2010,6 +2018,15 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                      profile, verified_at-verify_started,
                      verified_at-location_check_finished if 'location_check_finished' in locals()
                      else 0.0)
+    if prepare_only:
+        if profile == "fdny" and correction_guard is not None and source_call is not None:
+            correction_guard.ingest([])
+            reason = correction_guard.reason(hit, source_call)
+            if reason:
+                hit["hold_reason"] = reason
+                return "suppressed"
+        hit["hold_reason"] = ""
+        return "verified"
     ogg = None
     if ogg_task is not None:
         try:
@@ -2194,50 +2211,59 @@ def _ptt_ready(profile: str) -> list[Path]:
                   key=lambda p: p.stat().st_mtime)
 
 
+async def _bounded_second_listen(path: Path, profile: str, stats) -> str:
+    """One independent pass, cached on the recording across grouped candidates."""
+    key = (str(path), profile)
+    cache = getattr(stats, "_second_audio_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        stats._second_audio_cache = cache
+    if key in cache:
+        return cache[key]
+    try:
+        text = await asyncio.wait_for(asyncio.to_thread(
+            transcribe.second_listen, path, profile), timeout=25)
+    except Exception as exc:
+        logging.warning("[%s] second listen failed (%s)", profile, type(exc).__name__)
+        text = ""
+    cache[key] = text or ""
+    if hasattr(stats, "mark_groq"):
+        stats.mark_groq("nonempty" if text else "empty_or_unavailable")
+    logging.info("[%s] audio_review recording=%s result=%s", profile,
+                 path.name, "nonempty" if text else "empty_or_unavailable")
+    if len(cache) > 200:
+        cache.pop(next(iter(cache)))
+    stats.event(profile, "second listen completed" if text else "second listen unavailable; retained hold")
+    return text or ""
+
+
 async def verify_zello_with_second_listen(profile: str, hit: dict, stats,
                                           clip_name: str, *, fresh_ts: float) -> tuple[str, dict]:
-    """Primary ASR first; one optional second listen before finalizing a hold.
-
-    A different job/address never becomes an automatic post. Every revised
-    candidate goes through the entire normal verification and freshness gate.
-    """
+    """Prepare without sending; recover only one compatible recorded dispatch."""
+    import copy
+    import audio_review
+    original = copy.deepcopy(hit)
+    if audio_review.mixed(hit.get("excerpt") or "", profile):
+        hit["hold_reason"] = "mixed dispatch addresses; complaint pairing unverified"
+        return "suppressed", hit
     outcome = await verify_and_send(profile, hit, stats, clip_name, fresh_ts=fresh_ts,
-                                    audio_ts=fresh_ts)
-    if outcome != "suppressed" or not transcribe.GROQ_ENABLED:
-        return outcome, hit
+                                    audio_ts=fresh_ts, prepare_only=True)
+    if outcome == "verified":
+        return await verify_and_send(profile, hit, stats, clip_name,
+                                      fresh_ts=fresh_ts, audio_ts=fresh_ts), hit
     reason = hit.get("hold_reason") or ""
-    if reason not in ("no nature", "no verified location", "ambiguous default borough",
-                      "spoken crossing roads not verified") and not reason.startswith(
-                          ("spoken cross unverified:",)):
+    recoverable = reason in ("no nature", "no verified location", "ambiguous default borough",
+                            "spoken crossing roads not verified") or reason.startswith("spoken cross unverified:")
+    if not recoverable or not transcribe.GROQ_ENABLED or time.time()-fresh_ts > FRESH_LIVE_SEC:
         return outcome, hit
-    # If the first ASR heard a complaint, the second ear may clarify its
-    # location, never overturn that complaint into another incident. An
-    # original 'no nature' may recover only when the road and house agree.
     src = ARCHIVE_DIR / clip_name
     if not src.is_file():
         return outcome, hit
-    second = await asyncio.to_thread(transcribe.second_listen, src, profile)
-    if not second:
+    second = await _bounded_second_listen(src, profile, stats)
+    candidate, why = audio_review.one_candidate(second, profile)
+    if not candidate or not audio_review.compatible(original, candidate, profile):
+        stats.event(profile, why or "second listen disagreed on incident; retained hold")
         return outcome, hit
-    candidates = [detect.analyze(span, profile) for span in
-                  detect.split_dispatch_jobs(second, profile)]
-    candidates = [c for c in candidates if c and c.get("nature") and c.get("address")]
-    if len(candidates) != 1:
-        return outcome, hit
-    candidate = candidates[0]
-    # Two ASR readings can disagree about a street or another incident.
-    # Only rescue this same road with an equal or newly recovered house.
-    old_road = _street_core(hit.get("address") or "")
-    new_road = _street_core(candidate["address"])
-    old_house = re.match(r"^\s*(\d{1,5}(?:-\d{1,3})?)\s+", hit.get("address") or "")
-    new_house = re.match(r"^\s*(\d{1,5}(?:-\d{1,3})?)\s+", candidate["address"])
-    if (not old_road or old_road != new_road or
-            (old_house and (not new_house or old_house.group(1) != new_house.group(1))) or
-            (hit.get("nature") and candidate["nature"].lower() != hit["nature"].lower())):
-        stats.event(profile, "second listen disagreed on incident location or complaint; held for review")
-        return outcome, hit
-    # A second ASR is diagnostic, not permission to silently replace a
-    # different claimed town; the map must still verify its exact job area.
     revised = await verify_and_send(profile, candidate, stats, clip_name,
                                     fresh_ts=fresh_ts, audio_ts=fresh_ts)
     if revised == "sent":
@@ -2270,19 +2296,30 @@ async def ptt_consumer(profile: str, stats: Stats, seen: dict) -> None:
                     zello_ingest.stream_owner(profile, wav.stem, started, stopped, "failed")
                     wav.unlink(missing_ok=True);wav.with_suffix(".json").unlink(missing_ok=True)
                     continue
+                stats.mark_segment(profile)
                 asr_started = time.monotonic()
                 text = await asyncio.to_thread(transcribe.transcribe, wav, profile)
                 logging.info("[%s] stages ptt_stop_to_read=%.2fs asr=%.2fs",
                              profile, max(0.0, time.time()-stopped),
                              time.monotonic()-asr_started)
+                if not text and transcribe.GROQ_ENABLED:
+                    text = await _bounded_second_listen(wav, profile, stats)
                 if not text:
                     zello_ingest.stream_owner(profile, wav.stem, started, stopped, "failed")
                     wav.unlink(missing_ok=True);wav.with_suffix(".json").unlink(missing_ok=True)
                     continue
                 zello_ingest.stream_owner(profile, wav.stem, started, stopped, "owned")
-                stats.mark_segment(profile);stats.mark_transcript(profile, text)
+                stats.mark_transcript(profile, text)
                 await _kw_check(profile, text)
                 hit = detect.analyze(text, profile)
+                if (not hit and transcribe.GROQ_ENABLED and re.search(
+                        r"\b(?:any units|units (?:available|respond|to)|dispatch to|"
+                        r"sullivan (?:county )?dispatch)\b", text, re.I)):
+                    import audio_review
+                    second = await _bounded_second_listen(wav, profile, stats)
+                    candidate, why = audio_review.one_candidate(second, profile)
+                    if candidate:
+                        text, hit = second, candidate
                 addr = (hit or {}).get("address", "")
                 nature = (hit or {}).get("nature", "")
                 matched = None
@@ -2801,6 +2838,44 @@ def _fdny_clip_sanity(wav: Path | None, transcript: str) -> str:
     return ""
 
 
+async def _fdny_audio_review(call: dict, original: dict | None, stats,
+                             clip_name: str, reason: str,
+                             send_lock=None, correction_guard=None) -> tuple[dict | None, str]:
+    """Prepare then re-listen questionable jobs. Never send from the review."""
+    import copy
+    import audio_review
+    fresh = float(call.get("ts") or 0)
+    if not fresh or not 0 <= time.time()-fresh <= FRESH_FDNY_SEC:
+        return original, "stale audio; independent review skipped"
+    text = str(call.get("transcription") or "")
+    if audio_review.mixed(text, "fdny"):
+        return original, "FDNY clip contains multiple distinct box jobs; complaint/address pairing unverified"
+    kwargs = dict(fresh_ts=fresh, audio_ts=float(call.get("audio_start_ts") or fresh),
+                  send_lock=send_lock, correction_guard=correction_guard,
+                  source_call=call, prepare_only=True)
+    trial = copy.deepcopy(original)
+    prepared = "suppressed"
+    if trial and not reason:
+        prepared = await verify_and_send("fdny", trial, stats, clip_name, **kwargs)
+        if prepared != "verified":
+            reason = trial.get("hold_reason") or "location not verified"
+    if not audio_review.needs_fdny_review(original, text, reason):
+        return original, ""
+    second = await _bounded_second_listen(ARCHIVE_DIR / clip_name, "fdny", stats)
+    candidate, why = audio_review.one_candidate(second, "fdny")
+    if not candidate:
+        return original, why
+    if not audio_review.compatible(original, candidate, "fdny", prepared == "verified"):
+        return original, "FDNY independent audio disagrees on incident anchors"
+    # Both readings on the same clip may share a box but not a complaint.
+    # New location candidates remain exact-map gated, never map-invented.
+    result = await verify_and_send("fdny", candidate, stats, clip_name, **kwargs)
+    if result != "verified":
+        return original, candidate.get("hold_reason") or "independent location not verified"
+    candidate["audio_reviewed"] = True
+    return candidate, ""
+
+
 async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                             send_lock: asyncio.Lock | None = None,
                             correction_guard: CorrectionGuard | None = None) -> None:
@@ -2817,6 +2892,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
     # Calls provides a transcription. Parse it while the audio downloads;
     # the WAV archive still completes before verification and any outbound post.
     hit = None
+    independently_read = False
     if text:
         stats.mark_transcript("fdny", text)
         logging.info("[fdny] heard: %s", text[:160])
@@ -2842,7 +2918,11 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                 (tmp / f"{cid}{suffix}").unlink(missing_ok=True)
             return
     if not text and wav is not None:
-        text = await asyncio.to_thread(transcribe.transcribe, wav)
+        if os.environ.get("FDNY_AUDIO_REVIEW", "0") == "1":
+            text = await _bounded_second_listen(wav, "fdny", stats)
+            independently_read = bool(text)
+        else:
+            text = await asyncio.to_thread(transcribe.transcribe, wav)
         if text:
             stats.mark_transcript("fdny", text)
             logging.info("[fdny] heard: %s", text[:160])
@@ -2852,11 +2932,21 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             except Exception as e:  # noqa: BLE001
                 logging.warning("[fdny] detect failed: %s", e)
                 stats.event("fdny", f"detect error: {e}")
+    if independently_read:
+        problem = _fdny_clip_sanity(wav, text)
+        if problem:
+            _fdny_call_record(call, text, None, hit, "suppressed", problem)
+            stats.event("fdny", "held: " + problem)
+            for suffix in (".m4a", ".wav"):
+                (tmp / f"{cid}{suffix}").unlink(missing_ok=True)
+            return
     clip_name = None
-    if wav is not None and text:
+    if wav is not None:
         clip_name = f"fdny-{int(time.time())}-{re.sub(r'[^A-Za-z0-9_-]', '_', cid)[:40]}.wav"
         await asyncio.to_thread(_archive_clip, wav, clip_name)
         stats.mark_clip("fdny", clip_name, text)
+        if independently_read:
+            stats._second_audio_cache[(str(ARCHIVE_DIR / clip_name), "fdny")] = text
     archived_at = time.monotonic()
     for suffix in (".m4a", ".wav"):
         try:
@@ -2870,6 +2960,13 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
         _fdny_call_record(call, "", clip_name, None, "skipped", "no transcription")
         stats.event("fdny", "call with no transcription - detect skipped")
         return
+    if not hit and os.environ.get("FDNY_AUDIO_REVIEW", "0") == "1" and clip_name:
+        import audio_review
+        second = await _bounded_second_listen(ARCHIVE_DIR / clip_name, "fdny", stats)
+        hit, why = audio_review.one_candidate(second, "fdny")
+        if hit:
+            text = second
+            hit["audio_reviewed"] = True
     if not hit:
         _fdny_call_record(call, text, clip_name, None, "skipped", "no parsed incident")
         return
@@ -2924,13 +3021,15 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
     # replaced with a transmission-type fallback. Keep the audio for review.
     # This is active independently of the experimental second-ASR path.
     import fdny_audio_gate
-    if not hold_reason and fdny_audio_gate.unclassified_fire_complaint(text, nature):
+    import audio_review
+    if not hold_reason and audio_review.complaint_lost(text, nature):
         hold_reason = "FDNY specific fire complaint unclassified; audio review required"
     # Bounded trial: only re-hear otherwise sendable weak fallback incidents.
     # Disabled until the independent service has a demonstrated success rate.
     # An unavailable pass cannot certify a post; the existing vendor/sender
     # gates remain in force when this trial is off.
-    if (not hold_reason and os.environ.get("FDNY_WEAK_AUDIO_GATE", "0") == "1"
+    if (not hold_reason and os.environ.get("FDNY_AUDIO_REVIEW", "0") != "1"
+            and os.environ.get("FDNY_WEAK_AUDIO_GATE", "0") == "1"
             and re.match(r"^(?:phone alarm|fire alarm|automatic alarm|alarm activation)\b", nature, re.I)):
         independent = ""
         if clip_name:
@@ -2952,11 +3051,24 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             verified_street = False
         if not verified_street:
             hold_reason = "FDNY street spelling needs independent audio check"
+    if os.environ.get("FDNY_AUDIO_REVIEW", "0") == "1":
+        review_call = dict(call, transcription=text)
+        try:
+            revised, hold_reason = await _fdny_audio_review(
+                review_call, hit, stats, clip_name or "", hold_reason,
+                send_lock, correction_guard)
+            if revised is not None:
+                hit = revised
+                nature, address = hit.get("nature") or "", hit.get("address") or ""
+        except Exception as exc:
+            logging.warning("[fdny] audio review failed (%s)", type(exc).__name__)
+            hold_reason = "FDNY independent audio review failed"
     if hold_reason:
         hit["hold_reason"] = hold_reason
         # Rescue only the narrow map-failed named-house case, while live.
         # Other holds (mixed jobs, borough, numbered cross, etc.) stay held.
-        if hold_reason == "FDNY street spelling needs independent audio check" and wav is not None:
+        if (os.environ.get("FDNY_AUDIO_REVIEW", "0") != "1" and
+                hold_reason == "FDNY street spelling needs independent audio check" and wav is not None):
             try:
                 rescue = await _fdny_recover_held_street(
                     hit, wav, stats, call, clip_name or "", send_lock,

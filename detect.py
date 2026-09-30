@@ -543,6 +543,14 @@ def extract_audio_crosses(text: str) -> str | None:
             r = _pair(m.group(1), m.group(2))
             if r:
                 return r
+    # A highway suffix may include a direction after its road type. Do not
+    # trim the road name off "Belt Parkway South" before a spoken cross.
+    m = re.search(r"\b((?:Belt|Grand Central|Southern State)\s+Parkway\s+"
+                  r"(?:South|North|East|West))\s+to\s+(" + _ANCH + r")\b", t, re.I)
+    if m:
+        r = _pair(m.group(1), m.group(2))
+        if r:
+            return r
     # anchored to anchored: "Glenwood Road to Avenue H"
     m = re.search(rf"({_ANCH})\s+to\s+({_ANCH})\b", t, re.I)
     if m:
@@ -1220,12 +1228,21 @@ def get_nature(text: str, profile: str = "") -> str:
         if floor and not re.search(r"\b(?:no|not|without|negative)\s+$",
                                    t[max(0, floor.start()-12):floor.start()]):
             return _addr_title(floor.group(0))
+    if profile == "fdny" and not _negative_fire_context(t):
+        vehicle_fire = re.search(r"\b(?:truck|car|vehicle)\s+fire\b", t)
+        if vehicle_fire:
+            return _addr_title(vehicle_fire.group(0))
     v = vt(r"\b(?:rubbish fire|garbage fire|trash fire|rubbish)\b")
     if v: return v
     v = vt(r"\b(?:outside fire|brush fire)\b")
     if v: return v
     v = vt(r"\baided\b")
     if v: return v
+    # An explicit gasoline odor is a complaint, not the phone-alarm prefix.
+    gasoline = re.search(r"\bodou?r\s+(?:of\s+)?gasoline\b", t)
+    if gasoline and not re.search(r"\b(?:no|not|without|negative)\s+$",
+                                  t[max(0, gasoline.start()-20):gasoline.start()]):
+        return "Odor of Gasoline"
     # A dispatcher can say either "odor of gas" or "gas odor". Both are
     # explicit complaints and outrank the transmission type (Phone Alarm).
     v = vt(r"\b(?:odou?r (?:of )?gas|gas odou?r|odou?r (?:outside|in the area))\b")
@@ -1515,6 +1532,31 @@ def _hatzalah_mixed_backup_medic(text: str) -> bool:
     return True
 
 
+def _hatzalah_location_text(text: str) -> str:
+    """Chapter/member IDs are never house numbers. Keep actual numbered roads."""
+    return re.sub(r"\b(?:CH|PH|K|F|B|W|S|Y|HS)\s*[-:]?\s*\d{1,3}\b",
+                  "member", text, flags=re.I)
+
+
+def _hatzalah_dispatch_corner(text: str):
+    """First explicit named corner, ahead of later member routing readouts.
+
+    A bare second road remains a candidate, never a claimed full road name;
+    the sender must map-check both sides before publishing the intersection.
+    """
+    road = r"[A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2}\s+(?:Parkway|Pkwy|Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd)"
+    m = re.search(r"\b("+road+r")\s+(?:and|&)\s+"
+                  r"([A-Za-z][A-Za-z'-]*(?:\s+(?:Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd))?)\b", text, re.I)
+    if not m:
+        return None
+    a,b=m.group(1).strip(),m.group(2).strip()
+    # Do not eat a responding person's label or dispatch filler as a road.
+    if any(w.lower() in _NAME_STOP or w.lower()=='member' for w in b.split()):
+        return None
+    a=re.sub(r"^(?:Crown Heights|any units|units to|units in|in|for|at|on)\s+", "", a, flags=re.I)
+    return _addr_title(a), _addr_title(b)
+
+
 def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     """Return an alert dict, or None when this chunk should not alert."""
     source = profile
@@ -1582,6 +1624,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         if full:
             t = re.sub(r"\bbox\s+\d{5,7}\b", "", t, flags=re.I)
     if profile == "hatzolah":
+        t = _hatzalah_location_text(t)
         # A unit label B50 paired with 18 is not the Boro Park grid corner.
         # A separate complaint later in the clip cannot make it an address.
         t = re.sub(r"\bB\s*50\s+and\s+18\b", "B50 / 18 units", t, flags=re.I)
@@ -1631,6 +1674,11 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     # primary roads into this rule.
     three_roads = extract_spoken_three_road_location(t) if profile != "fdny" else None
     direct_pair = extract_direct_street_pair(t) if profile != "fdny" else None
+    if profile == "hatzolah":
+        dispatch_corner = _hatzalah_dispatch_corner(t)
+        if dispatch_corner:
+            direct_pair = dispatch_corner
+
     if three_roads:
         direct_pair = (three_roads[0], three_roads[1])
     if profile == "hatzolah" and direct_pair:

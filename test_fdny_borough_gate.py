@@ -486,7 +486,7 @@ class TestSecondListenGate(unittest.IsolatedAsyncioTestCase):
         hit = {"address": "48 Anemone Lane, Loch Sheldrake, NY", "nature": "",
                "hold_reason": "no nature"}
         fake = "Dispatch to Loch Sheldrake, activated fire alarm, 48 Anemone Lane"
-        with patch.object(main.transcribe, "GROQ_ENABLED", True), patch.object(
+        with patch.object(main.transcribe, "GROQ_ENABLED", True), patch.object(main.time, "time", return_value=110), patch.object(
                 main.ARCHIVE_DIR.__class__, "is_file", return_value=True), patch.object(
                 main, "verify_and_send", new_callable=AsyncMock,
                 side_effect=["suppressed", "sent"]) as verify, patch.object(

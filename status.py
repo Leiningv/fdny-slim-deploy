@@ -34,7 +34,7 @@ import control
 
 STARTED_AT = time.time()
 ARCHIVE_DIR = Path(os.environ.get("ARCHIVE_DIR", "./segments/archive"))
-ARCHIVE_KEEP = int(os.environ.get("ARCHIVE_KEEP", "10"))  # clips per feed
+ARCHIVE_KEEP = int(os.environ.get("ARCHIVE_KEEP", "100"))  # clips per feed
 
 
 def plain_reason(reason: str, address: str = "") -> str:
@@ -235,6 +235,9 @@ class Stats:
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(STARTED_AT)),
                 "uptime_sec": round(time.time() - STARTED_AT, 1),
                 "git_commit": self.git_commit,
+                "audio_review": {"fdny_enabled": os.environ.get("FDNY_AUDIO_REVIEW", "0") == "1",
+                                 "archive_clips_per_feed": ARCHIVE_KEEP,
+                                 "archive_bytes_per_feed": int(os.environ.get("ARCHIVE_MAX_BYTES_PER_FEED", "100000000"))},
                 "groq": {"enabled": self.groq_enabled,
                          "key_present": self.groq_key_present,
                          "last_result": self.groq_last_result,
