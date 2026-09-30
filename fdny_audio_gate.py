@@ -67,6 +67,10 @@ def generic_nature_invariant(transcript: str, nature: str) -> bool:
     """Safety invariant, independent of phrase extraction and review flags."""
     generic = re.fullmatch(r"(?:phone alarm|automatic alarm|fire alarm|alarm activation|class 3|fire|unknown|unknown problem)", (nature or "").strip(), re.I)
     if not generic: return False
+    status = re.search(r"\b(?:completely evacuated|primary(?:\s+search)?(?:\s+is)?(?:\s+a)?\s+negative|leak(?:\s+is)?\s+under control)\b", transcript or "", re.I)
+    new_complaint = re.search(r"\b(?:for|reporting)\s+(?:an?\s+)?(?:smoke|fire|gas|automatic alarm|alarm activation|water leak|stuck elevator|boat in distress|electrical|carbon monoxide|co alarm)\b", transcript or "", re.I)
+    if status and not new_complaint:
+        return True
     for m in re.finditer(r"\b(?:gas detector activation|gas alarm|boat in distress)\b", transcript or "", re.I):
         prefix = (transcript or "")[max(0,m.start()-35):m.start()]
         if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,3}$", prefix, re.I):

@@ -1213,7 +1213,7 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\bdrown\w*\b")
     if v: return v
-    v = vt(r"\b(?:syncope|faint(?:ed|ing)?|passed out)\b")
+    v = vt(r"\b(?:near syncope|syncope|faint(?:ed|ing)?|passed out)\b")
     if v: return v
     v = vt(r"\bdiabet\w*\b|\b(?:low|high)\s+(?:blood\s+)?sugar\b")
     if v: return v
