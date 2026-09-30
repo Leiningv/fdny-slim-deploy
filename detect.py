@@ -1592,6 +1592,15 @@ def _hatzalah_dispatch_corner(text: str):
     return _addr_title(a), _addr_title(b)
 
 
+def patient_age(text: str) -> str:
+    """Explicit age wording only, never a bare member/unit number."""
+    ages = re.findall(r"\b(\d{1,3})[ -]+(month|year|day|week)s?[ -]+old\b", text, re.I)
+    distinct = {f"{int(n)}-{unit.lower()}-old" for n, unit in ages
+                if 0 < int(n) <= (120 if unit.lower() == "year" else 365)}
+    # Multiple different patients cannot supply one safe age line.
+    return next(iter(distinct)) if len(distinct) == 1 else ""
+
+
 def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     """Return an alert dict, or None when this chunk should not alert."""
     source = profile
@@ -1898,6 +1907,8 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "spoken_time": spoken_time,
         "source": source,
         "nature": nature,
+        "patient_age": patient_age(text) if profile == "hatzolah" else "",
+        "heard_location_evidence": _norm(text)[:600] if profile == "hatzolah" and "&" in addr else "",
         "apartment": apt if profile != "fdny" else "",
         "address": addr,
         "area_defaulted": bool(profile == "hatzolah" and

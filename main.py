@@ -121,7 +121,9 @@ FDNY_INBOX = SEG_DIR / "fdny_inbox.jsonl"
 FDNY_IDS = SEG_DIR / "fdny_ids.json"
 
 SOURCE_LABEL = {"hatzolah": "Hatzolah Dispatch", "sullivan": "Sullivan Co Fire/EMS",
-                "fdny": "FDNY Brooklyn Dispatch"}
+                "fdny": "FDNY Brooklyn Dispatch",
+                "zello-hatzalah": "Hatzalah Dispatch", "hatzalah": "Hatzalah Dispatch",
+                "zello-hatzolah": "Hatzalah Dispatch"}
 
 
 def _load_env_file(path: Path = Path("config.env")) -> None:
@@ -2159,6 +2161,8 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         r"collision|rollover|entrap)\w*\b", nature, re.I)
     icon = "\N{AMBULANCE}" if medical else "\N{FIRE}"
     lines = [f"*{icon} {nature}*", "", addr_line]
+    if (hit.get("source") or "").removeprefix("zello-") in ("hatzalah", "hatzolah") and hit.get("patient_age"):
+        lines.append(hit["patient_age"])
     if is_sullivan and hit.get("verified_area"):
         lines.append(f"*{hit['verified_area'].upper()}*")
     if hit.get("apartment"):
@@ -2422,7 +2426,8 @@ async def ptt_consumer(profile: str, stats: Stats, seen: dict) -> None:
                         await _post_held_review(profile, hit, clip_name)
                     stats.mark_alert(profile,hit["nature"],hit["address"],ok,
                                      voice_url=hit.get("voice_url",""),failed=(outcome=="queued"),
-                                     outcome=outcome,reason=hit.get("hold_reason",""))
+                                     outcome=outcome,reason=hit.get("hold_reason",""),
+                                     patient_age=hit.get("patient_age",""), heard_location_evidence=hit.get("heard_location_evidence",""))
                     _append_alert_log({"t":now,"feed":profile,"nature":hit["nature"],
                                        "address":hit["address"],"sent":ok,"excerpt":hit["excerpt"]})
             except Exception as e:
@@ -2521,7 +2526,8 @@ async def consumer(profile: str, stats: Stats, seen: dict) -> None:
                 stats.mark_alert(profile, hit["nature"], hit["address"], ok,
                                  voice_url=hit.get("voice_url", ""),
                                  failed=(outcome == "queued"), outcome=outcome,
-                                 reason=hit.get("hold_reason", ""))
+                                 reason=hit.get("hold_reason", ""), patient_age=hit.get("patient_age", ""),
+                                 heard_location_evidence=hit.get("heard_location_evidence", ""))
                 _append_alert_log({"t": now, "feed": profile, "nature": hit["nature"],
                                    "address": hit["address"], "sent": ok,
                                    "excerpt": hit["excerpt"]})

@@ -123,7 +123,8 @@ class Stats:
             for a in json.loads(self._hist_file.read_text())[-500:]:
                 self.alerts.append({"t": a["t"], "feed": a["feed"], "nature": a["nature"],
                                     "address": a["address"], "sent": a["sent"],
-                                    "outcome": a.get("outcome", ""), "voice": a.get("voice", ""), "reason": a.get("reason", "")})
+                                    "outcome": a.get("outcome", ""), "voice": a.get("voice", ""), "reason": a.get("reason", ""),
+                         "patient_age": a.get("patient_age", ""), "heard_location_evidence": a.get("heard_location_evidence", "") })
         except Exception:
             pass
 
@@ -183,7 +184,8 @@ class Stats:
 
     def mark_alert(self, profile: str, nature: str, address: str, ok: bool,
                    failed: bool = True, outcome: str = "", voice_url: str = "",
-                   reason: str = "") -> None:
+                   reason: str = "", patient_age: str = "",
+                   heard_location_evidence: str = "") -> None:
         with self._lock:
             f = self.feed(profile)
             f["last_alert_at"] = time.time()
@@ -195,13 +197,15 @@ class Stats:
             out = outcome or ("sent" if ok else ("failed" if failed else "suppressed"))
             self.alerts.appendleft({"t": time.time(), "feed": profile,
                                     "nature": nature, "address": address, "sent": ok,
-                                    "outcome": out, "voice": voice_url, "reason": reason[:160]})
+                                    "outcome": out, "voice": voice_url, "reason": reason[:160],
+                                    "patient_age": patient_age, "heard_location_evidence": heard_location_evidence[:600]})
             self.events.appendleft({"t": time.time(), "feed": profile,
                                     "msg": f"ALERT {out}: {nature} @ {address}"})
             try:
                 hist = [{"t": a["t"], "feed": a["feed"], "nature": a["nature"],
                          "address": a["address"], "sent": a["sent"],
-                         "outcome": a.get("outcome", ""), "voice": a.get("voice", ""), "reason": a.get("reason", "")}
+                         "outcome": a.get("outcome", ""), "voice": a.get("voice", ""), "reason": a.get("reason", ""),
+                         "patient_age": a.get("patient_age", ""), "heard_location_evidence": a.get("heard_location_evidence", "") }
                         for a in sorted(list(self.alerts), key=lambda x: -x["t"])[:500]]
                 self._hist_file.parent.mkdir(parents=True, exist_ok=True)
                 self._hist_file.write_text(json.dumps(hist))
@@ -269,7 +273,8 @@ class Stats:
                     {"ts": a["t"], "feed": a["feed"], "nature": a["nature"],
                      "address": a["address"], "sent": a["sent"],
                      "outcome": a.get("outcome") or ("sent" if a["sent"] else "failed"),
-                     "voice": a.get("voice", ""), "reason": plain_reason(a.get("reason", ""), a.get("address", ""))}
+                     "voice": a.get("voice", ""), "reason": plain_reason(a.get("reason", ""), a.get("address", "")),
+                     "patient_age": a.get("patient_age", ""), "heard_location_evidence": a.get("heard_location_evidence", "")}
                     for a in sorted(list(self.alerts), key=lambda x: -x["t"])[:500]
                 ],
                 "clips": [
@@ -875,7 +880,8 @@ def make_app(stats: Stats) -> web.Application:
             try:
                 hist = [{"t": a["t"], "feed": a["feed"], "nature": a["nature"],
                          "address": a["address"], "sent": a["sent"],
-                         "outcome": a.get("outcome", ""), "voice": a.get("voice", ""), "reason": a.get("reason", "")}
+                         "outcome": a.get("outcome", ""), "voice": a.get("voice", ""), "reason": a.get("reason", ""),
+                         "patient_age": a.get("patient_age", ""), "heard_location_evidence": a.get("heard_location_evidence", "") }
                         for a in sorted(stats.alerts, key=lambda x: -x["t"])[:500]]
                 stats._hist_file.parent.mkdir(parents=True, exist_ok=True)
                 stats._hist_file.write_text(json.dumps(hist))
