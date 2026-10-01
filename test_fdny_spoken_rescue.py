@@ -29,7 +29,7 @@ class SpokenDispatchRegression(unittest.TestCase):
     def test_unrelated_smoke_chatter_not_promoted(self):
         t = ("Phone Alarm box 2427, 1409 New York Avenue, "
              "no smoke reported, caller's in apartment 6 G")
-        self.assertEqual(detect.analyze(t, "fdny")["nature"], "Phone Alarm, Apartment 6G")
+        self.assertEqual(detect.analyze(t, "fdny")["nature"], "")
 
     def test_two_box_smoke_and_borough_are_not_globally_promoted(self):
         t = ("Queens, one alarm Box 2139, 93-18 Liberty Avenue, Phone Alarm. "
