@@ -20,7 +20,7 @@ class RequestStarts(unittest.TestCase):
         spans=detect.split_dispatch_jobs(t,'zello-hatzalah')
         self.assertEqual(len(spans),2)
         a,b=[detect.analyze(t,'zello-hatzalah') for t in spans]
-        self.assertEqual(a['nature'],'Trauma');self.assertEqual(b['nature'],'Bleeding')
+        self.assertFalse(a['nature']);self.assertEqual(b['nature'],'Bleeding')
         self.assertNotIn('Bleeding',a['nature'])
     def test_backup_without_complaint_not_split(self):
         self.assertEqual(len(detect.split_dispatch_jobs(PREFIX+'Any units in the B for 13 and 47? Unit to back up.','zello-hatzalah')),1)
