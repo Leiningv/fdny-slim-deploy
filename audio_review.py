@@ -38,6 +38,8 @@ def mixed(text, profile):
         pairs.add((m.group(1),m.group(2)))
     if len(pairs)>1:
         return True
+    if profile.removeprefix("zello-") in ("hatzalah", "hatzolah"):
+        text = detect.hatzalah_corner_unit_repeats(text)
     # Do not attach a complaint to the first of two distinct full addresses.
     houses = {re.sub(r'\s+', ' ', m.group().lower()) for m in re.finditer(
         r'\b\d{1,5}(?:-\d{1,3})?\s+(?:(?:[A-Za-z][A-Za-z\'-]*|\d+(?:st|nd|rd|th)?)\s+){1,4}'
