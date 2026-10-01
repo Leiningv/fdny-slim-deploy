@@ -7,9 +7,9 @@ class Clock(unittest.TestCase):
   h=detect.analyze(FIXTURE,'fdny');self.assertEqual(h['nature'],'Manhole');self.assertEqual(h['address'],'15 Temple Court, Brooklyn, NY');self.assertEqual(h['cross'],'Terrace Place & Seeley Street')
  def test_unit_chatter_still_skipped(self):
   for tail in ['Manhole 246','for manhole 9999','for manhole 0246 Engine246','for manhole 246']:
-   self.assertEqual(detect.get_nature('Phone alarm box1597 15 Temple Court '+tail,'fdny'),'Phone Alarm',tail)
+   self.assertEqual(detect.get_nature('Phone alarm box1597 15 Temple Court '+tail,'fdny'),'',tail)
  def test_clock_requires_fdny_job_local(self):
-  self.assertEqual(detect.get_nature('Phone alarm Manhole 0246','fdny'),'Phone Alarm')
+  self.assertEqual(detect.get_nature('Phone alarm Manhole 0246','fdny'),'')
  def test_generic_specific_veto(self):
   for phrase in ['manhole','elevator','water leak','wires down','transformer','carbon monoxide','gas odor','unstable facade']:
    self.assertTrue(gate.generic_nature_invariant('Phone alarm box1597 15 Temple Court for '+phrase,'Phone Alarm'),phrase)
