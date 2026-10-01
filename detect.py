@@ -204,6 +204,47 @@ SULLIVAN_AREAS = {
     "loch sheldrake": "Loch Sheldrake",
     "ganser": "Loch Sheldrake",  # Ganser Road is in Loch Sheldrake
     "blue maple": "Loch Sheldrake",  # Blue Maple Estates, Loch Sheldrake
+    # Sullivan County hamlets/villages (spoken-town tie-break, user request 10/2).
+    "mountain dale": "Mountain Dale",
+    "mountaindale": "Mountain Dale",
+    "mountain dell": "Mountain Dale",  # heard variant, 21 Church Rd call 10/1
+    "malletdale": "Mountain Dale",  # Groq ASR variant of the same call
+    "fallsburg": "Fallsburg",
+    "hurleyville": "Hurleyville",
+    "wurtsboro": "Wurtsboro",
+    "livingston manor": "Livingston Manor",
+    "roscoe": "Roscoe",
+    "callicoon": "Callicoon",
+    "jeffersonville": "Jeffersonville",
+    "narrowsburg": "Narrowsburg",
+    "eldred": "Eldred",
+    "cochecton": "Cochecton",
+    "bethel": "Bethel",
+    "white lake": "White Lake",
+    "kauneonga": "Kauneonga Lake",
+    "swan lake": "Swan Lake",
+    "parksville": "Parksville",
+    "ferndale": "Ferndale",
+    "rock hill": "Rock Hill",
+    "glen wild": "Glen Wild",
+    "hankins": "Hankins",
+    "youngsville": "Youngsville",
+    "barryville": "Barryville",
+    "highland lake": "Highland Lake",
+    "yulan": "Yulan",
+    "forestburgh": "Forestburgh",
+    "oakland valley": "Oakland Valley",
+    "mongaup valley": "Mongaup Valley",
+    "neversink": "Neversink",
+    "grahamsville": "Grahamsville",
+    "claryville": "Claryville",
+    "willowemoc": "Willowemoc",
+    "fremont center": "Fremont Center",
+    "lake huntington": "Lake Huntington",
+    "tennanah lake": "Tennanah Lake",
+    "kenoza lake": "Kenoza Lake",
+    "hortonville": "Hortonville",
+    "bloomingburg": "Bloomingburg",
 }
 
 # Brooklyn-relevant highways (trimmed from NYC_HIGHWAYS; whisper variants kept)
@@ -1353,6 +1394,7 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     if re.search(r"\b(?:fall|fell)\b", t):
         return "Fall"  # tense cleanup only; Hatzalah 'Fall' exclusion depends on it
+    if vt(r"\bhemorrhag(?:ing|ed|es)\b"): return "Hemorrhage"
     v = vt(r"\b(?:bleeding|hemorrhage)\b")
     if v: return v
     v = vt(r"\b(?:general illness|general ill|generally ill|gi distress)\b")
@@ -1401,10 +1443,8 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     # Hatzalah uses "full trauma" as a distinct obstetric code. Preserve
     # the whole spoken phrase rather than collapsing it to "Trauma".
-    if profile == "hatzolah":
-        v = vt(r"\bfull\s+trauma\b")
-        if v: return v
-    v = vt(r"\btrauma\b")
+    # Owner request (relayed 10/1): only "full trauma" posts; other trauma is dropped.
+    v = vt(r"\bfull\s+trauma\b")
     if v: return v
     v = vt(r"\bunconscious\b")
     if v: return v
@@ -2110,10 +2150,15 @@ def _hatzalah_dispatch_corner(text: str):
         return bare[1].title(), bare[2].title()
     road = r"[A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2}\s+(?:Parkway|Pkwy|Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd)"
     m = re.search(r"\b("+road+r")\s+(?:and|&)\s+"
-                  r"([A-Za-z][A-Za-z'-]*(?:\s+(?:Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd))?)\b", text, re.I)
+                  r"((?:Avenue|Ave)\s+(?:[A-Za-z]|alpha|bravo|charlie|delta|echo|frank|george|henry|king|lincoln|mary|nora|paul|queen|robert|sam|tom|victor|william|xray|yellow|zebra)|"
+                  r"[A-Za-z][A-Za-z'-]*(?:\s+(?:Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd))?)\b", text, re.I)
     if not m:
         return None
     a,b=m.group(1).strip(),m.group(2).strip()
+    # Lettered avenue ("Avenue C" / "Avenue Charlie"): keep the letter.
+    la = re.match(r"(?:Avenue|Ave)\s+(\S+)$", b, re.I)
+    if la:
+        b = "Avenue " + la.group(1)[0].upper()
     # Do not eat a responding person's label or dispatch filler as a road.
     if any(w.lower() in _NAME_STOP or w.lower()=='member' for w in b.split()):
         return None

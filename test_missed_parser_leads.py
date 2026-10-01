@@ -8,7 +8,7 @@ class Parser(unittest.TestCase):
   h=detect.analyze(t,'hatzolah');self.assertEqual(h['address'],'Rockaway Beach Boulevard, Queens, NY');self.assertEqual(h['direct_cross_candidate'],'Beach 80th');self.assertEqual(h['nature'],'Chest Pain')
  def test_kingston_tail(self):
   h=detect.analyze('Any units head to Kingston and Montgomery, trauma. PH79 head over to Kingston and Montgomery, the Crown.','hatzolah')
-  self.assertEqual(h['address'],'Kingston & Montgomery, Brooklyn, NY');self.assertEqual(h['nature'],'Trauma');self.assertFalse(h['direct_cross_candidate'])
+  self.assertEqual(h['address'],'Kingston & Montgomery, Brooklyn, NY');self.assertEqual(h['nature'],'');self.assertFalse(h['direct_cross_candidate'])
  def test_mental_health(self):
   h=detect.analyze('Dispatch Woodburn 12 Stangle Drive female mental health BLS response','sullivan');self.assertEqual(h['nature'],'Mental Health');self.assertEqual(h['address'],'12 Stangle Drive, Sullivan Co, NY')
   self.assertFalse(detect.get_nature('female no mental health BLS response','sullivan'))
