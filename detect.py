@@ -1389,6 +1389,8 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\bfire\s+in\s+a\s+private\s+dwelling\b|\bprivate\s+dwelling\s+fire\b")
     if v: return v
+    v = vt(r"\bpossible structure fire\b")
+    if v: return v
     v = vt(r"\b(?:structure|building|house)\s+fire\b")
     if v: return v
     v = vt(r"\bfire\s+in\s+the\s+kitchen\s+of\s+(?:a\s+)?restaurant\b")
@@ -1830,6 +1832,46 @@ def fdny_clipped_cross_only(text: str) -> bool:
                          text or "", re.I))
 
 
+def sullivan_single_job_repeat(text: str) -> bool:
+    t = text or ""
+    if re.search(r"\b(?:first|third|fourth|1st|3rd|4th)\s+(?:call|job)\b|\b(?:two|2) calls\b|\b(?:another|new) (?:job|call)\b", t, re.I):
+        return False
+    markers = list(re.finditer(r"\b(?:second|2nd) call\b", t, re.I))
+    if len(markers) != 2:
+        return False
+    road = r"(?:[A-Za-z][A-Za-z'-]*\s+){1,3}(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Court|Ct|Lane|Ln|Way)\b"
+    pair = re.compile(r"\b(?:in|from) the area of (?P<a>"+road+r")\s+(?:and|&)\s+(?P<b>"+road+r")", re.I)
+    spans = [t[markers[0].end():markers[1].start()], t[markers[1].end():]]
+    pairs=[]; natures=[]
+    for span in spans:
+        matches=list(pair.finditer(span))
+        if len(matches)!=1:
+            return False
+        m=matches[0]
+        names=tuple(re.sub(r"\s+"," ",m[x].strip().lower()) for x in ('a','b'))
+        # A house or a third typed road makes this more than one anchored job.
+        rest=span[:m.start()]+span[m.end():]
+        if re.search(road,rest,re.I) or re.search(r"\b\d{1,5}\s+"+road,span,re.I):
+            return False
+        nature = ('possible structure fire' if re.search(r'\bpossible structure fire\b',span,re.I) else 'odor of smoke' if re.search(r'\bodor of smoke\b',span,re.I) else get_nature(span,'sullivan'))
+        if not nature or not re.search(r"\b(?:odor of smoke|smoke in the area|possible structure fire)\b",span,re.I):
+            return False
+        complaint = span[:m.start()].strip(" ,.").casefold()
+        if complaint not in ("odor of smoke", "smoke", "possible structure fire, odor of smoke", "possible structure fire"):
+            return False
+        ending = span[m.end():]
+        expected = (r"[. ,]*For Monticello,?\s+a\s*" if len(pairs)==0 else r"[. ,]*\d{0,4}[. ,]*")
+        if not re.fullmatch(expected,ending,re.I):
+            return False
+        pairs.append(names);natures.append(nature.casefold())
+    if re.search(road,t[:markers[0].start()],re.I) or re.search(r"\b\d{1,5}\s+(?:[A-Za-z]+|Broadway)\b",t[:markers[0].start()],re.I):
+        return False
+    prefix = t[:markers[0].start()]
+    if not re.fullmatch(r"\s*(?:Sullivan County )?Dispatch to [A-Za-z ]+Fire[, .]*",prefix,re.I):
+        return False
+    return pairs[0]==pairs[1] and natures[0]==natures[1]
+
+
 def sullivan_numbered_jobs(text: str, profile: str) -> bool:
     """Explicit new numbered dispatches are not one address/complaint span.
 
@@ -1842,6 +1884,11 @@ def sullivan_numbered_jobs(text: str, profile: str) -> bool:
     numbered = bool(re.search(r"\b(?:second|third|fourth|2nd|3rd|4th)\s+(?:call|job)\b",
                               text or "", re.I))
     if not numbered:
+        return False
+    # A second-call re-page can be one repeated job, not two jobs. Require
+    # two complete complaint/location spans, identical typed intersections,
+    # and no extra road, house or distinct dispatch ordinal anywhere.
+    if sullivan_single_job_repeat(text):
         return False
     # This recorded re-page names one patient site. "Second call" belongs
     # to Bethel's mutual-aid crew routing, not a second patient address.
@@ -2187,6 +2234,10 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
                 sorted(map(re.escape, street_letters), key=len, reverse=True)) + r")\b",
             lambda m: "Avenue " + street_letters[m.group().split(maxsplit=1)[1].lower()],
             t, flags=re.I)
+    if profile == "sullivan" and re.search(r"\bMonticello\b", t, re.I) and re.search(r"\bCottage Street\s+(?:and|&)\s+Lanfield Avenue\b", t, re.I):
+        # Owner heard this exact corner and confirmed Landfield Avenue.
+        # Never rewrite Lanfield at another street or in another town.
+        t = re.sub(r"\bLanfield Avenue\b", "Landfield Avenue", t, flags=re.I)
     terminal_street = None
     raw_input = _norm(text)
     if profile == "sullivan":

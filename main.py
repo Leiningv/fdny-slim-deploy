@@ -628,6 +628,26 @@ async def _hatzalah_point_area(lat: float, lon: float, address: str, defaulted: 
     except Exception:
         return ""
 
+async def _sullivan_point_area(lat: float, lon: float, address: str) -> str:
+    """Attach a mapped two-road junction to Sullivan County and spoken town."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://nominatim.openstreetmap.org/reverse",
+                params={"lat": lat, "lon": lon, "format": "jsonv2", "addressdetails": 1},
+                headers={"User-Agent": "fdny-slim/1.0 (dispatch monitor; low volume)"},
+                timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status != 200: return ""
+                payload = await response.json()
+        area = payload.get("address") or {}
+        if area.get("county") != "Sullivan County" or area.get("state") != "New York": return ""
+        requested = address.split(",")[1].strip() if "," in address else ""
+        names = [re.sub(r"^(?:village|town|city|hamlet) of\s+", "", str(area.get(k) or ""), flags=re.I).strip()
+                 for k in ("town", "city", "village", "hamlet")]
+        return requested if requested and requested.casefold() in [n.casefold() for n in names] else ""
+    except Exception:
+        return ""
+
+
 async def _intersection_point(address: str, cross: str) -> tuple:
     if os.environ.get("GOOGLE_EXACT_INTERSECTION_FALLBACK", "0") != "1":
         return await _osm_intersection_point(address, cross)
@@ -1639,6 +1659,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         # usually slower, so the text post is not delayed.
         ogg_task = asyncio.create_task(asyncio.to_thread(_ensure_ogg, clip_name))
     verified = True
+    in_sullivan = False
     if highway_area_exception:
         stats.event(profile, "spoken highway area accepted under owner no-map rule; no precise pin")
     verified_label = ""
@@ -1762,6 +1783,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                     verified = False
                 else:
                     hit["address"] = re.sub(r",\s*[^,]+,\s*(NY|NJ)$", f", {mapped_area}, " + ("NJ" if hit["address"].endswith(", NJ") else "NY"), hit["address"])
+            if verified and profile.lower().removeprefix("zello-") == "sullivan":
+                mapped_area = await _sullivan_point_area(lat, lon, hit["address"])
+                verified = in_sullivan = bool(mapped_area)
             # Spatially constrained road-name intersection. If map service
             # is unavailable, verified stays false and alert is suppressed.
             verified_label = hit["address"] if verified else ""
