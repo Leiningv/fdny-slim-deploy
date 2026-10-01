@@ -90,10 +90,48 @@ def _rego_saunders_corner(text: str) -> bool:
     return bool(re.search(r"\b(?:in\s+)?Queens?\s*,?\s*(?:Rego|Trigo)\s+Park\s*,?\s+Saunders(?:\s+Street)?\s+(?:and|&)\s+64(?:th)?\s+Road\b", text, re.I))
 
 
+def spoken_hatzalah_locality(text: str) -> str:
+    """Job-local named places, not a unit origin or a town-named road.
+
+    South Folsburg is the observed initial read, independently repeated as
+    South Fallsburg. No broad phonetic town guessing.
+    """
+    places = {**BERGEN_AREAS, **FIVE_TOWNS_AREAS,
+              **{k: v for k, v in SULLIVAN_AREAS.items()
+                 if k in ("south fallsburg", "woodridge", "woodbourne", "monticello", "liberty", "loch sheldrake")},
+              "south folsburg": "S Fallsburg", "bayswater": "Queens",
+              "crown heights": "Brooklyn"}
+    for name in sorted(places, key=len, reverse=True):
+        place = re.escape(name)
+        if re.search(r"\b(?:in|near|at|for|town of|village of)\s+" + place +
+                     r"\b(?!\s+(?:Street|St|Avenue|Ave|Road|Rd|Lane|Ln|Drive|Dr|Place|Pl)\b)", text, re.I):
+            # A responding unit's origin cannot relabel the incident.
+            if re.search(r"\b(?:unit|engine|member|medic)\s+(?:is\s+)?(?:in|at)\s+" + place, text, re.I):
+                continue
+            return places[name]
+    # An explicitly named town need not be on a global neighborhood list.
+    # Capture only a dispatch request's area slot before its location; never
+    # a unit origin, an apparatus destination, or a road-named "town".
+    generic = re.search(
+        r"\b(?:any\s+(?:units?|assistance)(?:\s+available)?|dispatch|(?:the\s+)?(?:job|call|location)\s+is)"
+        r"\s+(?:in|at|for)\s+(?:the\s+(?:town|village|area)\s+of\s+)?"
+        r"([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,3}?)"
+        r"(?=\s+(?:for|from|at|near|in front of)\b|\s*,)", text, re.I)
+    if generic:
+        name = generic[1].strip()
+        if len(name) >= 3 and not re.fullmatch(r"(?:the\s+)?[A-Za-z]|town|the area", name, re.I) and not re.search(r"\b(?:unit|bus|medic|backup|back up|Street|St|Avenue|Ave|Road|Rd|Lane|Ln|Drive|Dr|Place|Pl|Parkway|Pkwy)\b", name, re.I):
+            # Known county/borough aliases keep their established handling.
+            return places.get(name.lower(), name.title())
+    return ""
+
+
 def get_hatzolah_area(text: str) -> str:
     """TSL-ChevraHatzalah mixes NYC divisions AND Sullivan County - trust the
     place names in the dispatch itself to set the area (user rule 9/28)."""
     t = text.lower()
+    explicit = spoken_hatzalah_locality(text)
+    if explicit:
+        return explicit
     if _rego_saunders_corner(text):
         return "Queens"
     if re.search(r"\b(?:in|for|near|at)\s+Bayswater\b|\bBayswater\s+for\b", text, re.I):
@@ -793,7 +831,8 @@ def _with_area(addr: str, profile: str, text: str) -> str:
     addr = re.sub(r"^(?:and|or)\s+", "", addr.strip(), flags=re.I)
     if profile == "hatzolah":
         locality = get_hatzolah_area(text)
-        state = "NJ" if locality in BERGEN_AREAS.values() else "NY"
+        state = "NJ" if (locality in BERGEN_AREAS.values() or
+            re.search(r"\b" + re.escape(locality) + r"\s*,?\s+(?:NJ|New Jersey)\b", text, re.I)) else "NY"
         area = f"{locality}, {state}"
     elif profile == "fdny":
         from fdny_borough_gate import spoken_job_borough
@@ -1350,6 +1389,15 @@ def get_nature(text: str, profile: str = "") -> str:
         if v: return v
     v = vt(r"\b(?:electrical|wires down|transformer)\b")
     if v: return v
+    if (profile == "fdny" and not _negative_fire_context(t)
+            and len(set(re.findall(r"\bbox\s*(\d{2,4})\b", t, re.I))) <= 1):
+        # The complaint outranks the equipment involved. Keep only a local
+        # smoke/elevator phrase, never smoke from a different request.
+        elevator_smoke = re.search(
+            r"\bodou?r\s+of\s+smoke(?:\s+(?:from|in|at)\s+(?:the\s+)?|\s*[,;]\s*(?:the\s+)?)elevator\b", t)
+        if elevator_smoke and not re.search(r"\b(?:no|not|without|negative)\s+$",
+                         t[max(0,elevator_smoke.start()-18):elevator_smoke.start()]):
+            return "Odor of Smoke from the Elevator"
     v = vt(r"\bstuck occupied elevator\b|\belevator\b")
     if v: return v
     if profile == "fdny":
@@ -1781,14 +1829,26 @@ def split_dispatch_jobs(text: str, profile: str) -> list[str]:
         # to a later numbered-house complaint. Split only on explicit house
         # plus directional numbered-road evidence, never bare crew numbers.
         bounds = [0]
+        # A new explicit request owns its own location and complaint. Crew
+        # acknowledgements and backup requests without a complaint are not
+        # incident boundaries. Keep the earlier span, even if incomplete.
+        requests = list(re.finditer(
+            r"\bany\s+units?\s+(?:(?:in|from)\s+(?:the\s+)?[A-Za-z][A-Za-z -]{0,35}\s+|"
+            r"(?:available|free|to be|that be)\s+)?for\s+", text or "", re.I))
+        for index, opener in enumerate(requests):
+            end = requests[index + 1].start() if index + 1 < len(requests) else len(text)
+            candidate = text[opener.start():end]
+            if opener.start() > 0 and extract_dispatch_address(candidate, "hatzolah") and get_nature(candidate, "hatzolah"):
+                bounds.append(opener.start())
+        bounds = sorted(set(bounds))
         house = re.compile(r"\b\d{3,5}\s+(?:East|West|North|South)\s+\d{1,3}(?:st|nd|rd|th)?\b", re.I)
         for m in house.finditer(text or ""):
-            prefix = text[bounds[-1]:m.start()]
+            prefix = text[max(b for b in bounds if b <= m.start()):m.start()]
             tail = text[m.end():]
             earlier = extract_direct_street_pair(prefix) or _hatzalah_dispatch_corner(prefix) or extract_audio_crosses(prefix)
             if earlier and re.search(r"\b(?:for|units? available|available for)\b", prefix, re.I) and get_nature(tail, "hatzolah"):
                 bounds.append(m.start())
-        bounds.append(len(text))
+        bounds = sorted(set(bounds + [len(text)]))
         return [text[a:b].strip(" .,\n") for a,b in zip(bounds,bounds[1:]) if text[a:b].strip(" .,\n")]
     if profile.removeprefix("zello-") != "sullivan":
         return [text]
@@ -2422,6 +2482,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "heard_location_evidence": _norm(text)[:600] if profile == "hatzolah" and "&" in addr else "",
         "apartment": apt if profile != "fdny" else "",
         "place": extract_named_place(text) if profile == "hatzolah" else "",
+        "spoken_locality": spoken_hatzalah_locality(text) if profile == "hatzolah" else "",
         "spoken_retained_cross": retained_cross,
         "address": addr,
         "area_defaulted": bool(profile == "hatzolah" and

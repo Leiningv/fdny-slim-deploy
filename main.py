@@ -573,7 +573,8 @@ async def geocode_verify(addr: str, profile: str = "") -> tuple:
                              ("city", "town", "village", "hamlet", "suburb")]
                     normalized = [re.sub(r"^(?:village|town|city|hamlet) of\s+", "", x).strip()
                                   for x in names if x]
-                    if requested_area.lower() not in normalized:
+                    request_key = {"s fallsburg": "south fallsburg"}.get(requested_area.lower(), requested_area.lower())
+                    if request_key not in normalized:
                         continue
             lat = lon = None
             try:
@@ -615,7 +616,8 @@ async def _hatzalah_point_area(lat: float, lon: float, address: str, defaulted: 
             return requested if any(n.casefold() == requested.casefold() for n in names) else ""
         if requested not in ("Brooklyn", "Queens", "Manhattan", "Bronx", "Staten Island"):
             names = [str(area.get(k) or "") for k in ("town", "city", "village", "hamlet", "suburb")]
-            if county in ("Nassau County", "Sullivan County") and any(n.casefold() == requested.casefold() for n in names):
+            request_key = {"s fallsburg": "south fallsburg"}.get(requested.casefold(), requested.casefold())
+            if county in ("Nassau County", "Sullivan County") and any(n.casefold() == request_key for n in names):
                 return requested
             if requested == "Riverdale" and borough == "Bronx":
                 return "Bronx"
@@ -1244,6 +1246,32 @@ def _street_core(addr: str) -> str:
     return re.sub(r"\s+", " ", s)
 
 
+def _locality_repeat_candidate(hit: dict, row: dict, now: float) -> bool:
+    """A recent proven defaulted post, not an arbitrary shared-token repeat.
+
+    Legacy rows lack provenance and are never eligible. House changes are
+    unsafe; only a bare road becoming a numbered house or the same house.
+    """
+    source = hit.get("source") or ""
+    if source.removeprefix("zello-") not in ("hatzalah", "hatzolah"):
+        return False
+    if (row.get("source") != source or not row.get("area_defaulted")
+            or not hit.get("spoken_locality") or hit.get("area_defaulted")
+            or not 0 <= now - row.get("t", 0) <= 120
+            or row.get("nature") != (hit.get("nature") or "").strip().lower()):
+        return False
+    old = row.get("address") or ""
+    new = hit.get("address") or ""
+    if not old.endswith(", Brooklyn, NY") or new.endswith(", Brooklyn, NY"):
+        return False
+    def parts(address):
+        core = address.split(",", 1)[0]
+        m = re.match(r"^(\d{1,5}(?:-\d{1,3})?[A-Za-z]?)\s+(.+)$", core)
+        return (m[1], _street_core(m[2])) if m else ("", _street_core(core))
+    oh, road = parts(old); nh, new_road = parts(new)
+    return bool(nh and road == new_road and (not oh or oh == nh))
+
+
 def _load_recent() -> list:
     try:
         data = json.loads(RECENT_FILE.read_text())
@@ -1461,6 +1489,12 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     verify_started = time.monotonic()
     from highway_area import spoken_area
     source_text = hit.get("dispatch_source_text") or (source_call or {}).get("transcription") or hit.get("excerpt") or ""
+    if (profile == "fdny" and not GEOCODE_VERIFY
+            and os.environ.get("FDNY_VERIFIED_HOUSE_UNVERIFIED_CROSSES", "0") == "1"
+            and re.match(r"^\d+[A-Za-z-]*\s+", hit.get("address") or "")
+            and "&" in (hit.get("cross") or "")):
+        hit["hold_reason"] = "exact house verification unavailable"
+        return "suppressed"
     if detect.sullivan_numbered_jobs(hit.get("dispatch_source_text") or source_text, profile):
         hit["hold_reason"] = "Sullivan numbered dispatch jobs; complaint/address pairing unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
@@ -1521,9 +1555,15 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             return "suppressed"
     nat_norm = (hit.get("nature") or "").strip().lower()
     toks = _rare_tokens(hit["address"])
+    locality_repeat = None
     if nat_norm and toks:
         for r in _load_recent():
             if r.get("nature") == nat_norm and toks & set(r.get("tokens") or []):
+                if _locality_repeat_candidate(hit, r, now):
+                    if os.environ.get("HATZALAH_LOCALITY_REPEAT_CORRECTION", "0") == "1":
+                        locality_repeat = r
+                        continue
+                    hit["locality_correction_candidate"] = r.get("address")
                 logging.info("[%s] suppressed (duplicate incident): %s @ %s",
                              profile, hit["nature"], hit["address"])
                 stats.event(profile, f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
@@ -1867,6 +1907,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
             stats.event(profile, f"suppressed (spoken crossings geometry): {gap_m:.0f}m")
             return "suppressed"
         stats.event(profile, f"two spoken crosses map-verified: {spoken_three}")
+    unverified_crosses = ""
     cross = "" if highway_area_exception else (hit.get("cross") or "").strip()
     if direct_candidate and not direct_pair_verified and verified:
         # A typed independently heard cross may be printed after a shared
@@ -1930,9 +1971,23 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         if not all(verdicts):
             stats.event(profile, f"unverified spoken FDNY crosses omitted: {cross}")
             ops_log(f"unverified spoken FDNY crosses omitted: {cross} @ {hit['address']}")
-            hit["hold_reason"] = "FDNY spoken cross pair could not be verified; terminal hold"
-            stats.event(profile, "Held: " + hit["hold_reason"])
-            return "suppressed"
+            # Private draft option, OFF unless separately approved. This
+            # does not rehabilitate a bare street, box-only location, fuzzy
+            # house, glued run or another failed incident guard.
+            from fdny_borough_gate import exact_numbered_fdny_match
+            house_only_allowed = (
+                os.environ.get("FDNY_VERIFIED_HOUSE_UNVERIFIED_CROSSES", "0") == "1"
+                and GEOCODE_VERIFY and verified
+                and exact_numbered_fdny_match(hit["address"], verified_label)
+                and not hit.get("box_glue_ambiguous")
+                and not hit.get("placeholder_crosses_unresolved"))
+            if not house_only_allowed:
+                hit["hold_reason"] = "FDNY spoken cross pair could not be verified; terminal hold"
+                stats.event(profile, "Held: " + hit["hold_reason"])
+                return "suppressed"
+            unverified_crosses = cross  # retain heard spelling, not map guesses
+            cross = ""  # never put unverified roads in the normal C/s line
+            stats.event(profile, "Exact house verified; heard crosses labeled unverified")
     if cross and lat is not None and lon is not None and verified_label \
             and profile.lower().removeprefix("zello-") != "sullivan":
         core = re.sub(r"^\s*\d+[a-zA-Z-]*\s+", "", hit["address"].split(",")[0]).strip()
@@ -2220,7 +2275,21 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         access = ("Grand Central Parkway Service Road" if
                   hit.get("service_road_spoken") else "Grand Central Parkway")
         hit["address"] = f"North Shore Towers, {access}, Queens, NY"
-    text_out = format_alert(hit, crosses=cross, confirmed=verified, footer=colony,
+    if locality_repeat is not None:
+        # Full verification still ran. Demand the same exact house and road
+        # in the returned label, in addition to geocoder town/county checks.
+        from fdny_borough_gate import _street_key
+        label_parts = [p.strip() for p in (verified_label or "").split(",")]
+        label_house_road = label_parts[0] if label_parts else ""
+        if re.fullmatch(r"\d{1,5}(?:-\d{1,3})?[A-Za-z]?", label_house_road) and len(label_parts) > 1:
+            label_house_road += " " + label_parts[1]
+        if (not GEOCODE_VERIFY or not verified or lat is None or lon is None
+                or _street_key(hit["address"].split(",", 1)[0]) !=
+                   _street_key(label_house_road)):
+            hit["hold_reason"] = "locality repeat exact house not verified"
+            return "suppressed"
+    text_out = format_alert(hit, crosses=cross, unverified_crosses=unverified_crosses,
+                            confirmed=verified, footer=colony,
                             box=box_disp if profile == "fdny" else "",
                             box_loc=box_loc if profile == "fdny" else "",
                             box_mismatch=box_mismatch if profile == "fdny" else False,
@@ -2228,6 +2297,9 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                             box_cross=spoken_cross if spoken_cross_verified and profile == "fdny" else "",
                             audio_ts=(audio_ts if audio_ts is not None else fresh_ts)
                             if clip_name else None, spoken_time=hit.get("spoken_time") or "")
+    if locality_repeat is not None:
+        text_out = ("LOCATION CORRECTION - replaces the earlier locality\n"
+                    + "Earlier: " + locality_repeat["address"] + "\n\n" + text_out)
     verified_at = time.monotonic()
     if profile.lower().removeprefix("zello-") == "sullivan":
         logging.info("[%s] stages verification_total=%.2fs after_location=%.2fs",
@@ -2293,7 +2365,12 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                      time.monotonic()-text_at, time.monotonic()-verify_started)
     if nat_norm and toks:
         recent = _load_recent()
-        recent.append({"t": now, "nature": nat_norm, "tokens": sorted(toks)})
+        if locality_repeat is not None:
+            recent = [r for r in recent if r != locality_repeat]
+        recent.append({"t": now, "nature": nat_norm, "tokens": sorted(toks),
+                       "address": hit["address"], "source": profile,
+                       "area_defaulted": bool(hit.get("area_defaulted")),
+                       "spoken_locality": hit.get("spoken_locality") or ""})
         _save_recent(recent)
     return "sent"
 
@@ -2302,7 +2379,8 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
                  footer: str | None = None, box: str = "", box_loc: str = "",
                  box_mismatch: bool = False, box_closest: bool = False,
                  box_cross: str = "",
-                 audio_ts: float | None = None, spoken_time: str = "") -> str:
+                 audio_ts: float | None = None, spoken_time: str = "",
+                 unverified_crosses: str = "") -> str:
     """User-picked layout (9/28, option 1): bold caps nature header with fire
     emoji; bold pinned address; plain 'between X & Y' crosses line; time;
     italic source footer at the very bottom. No transcript quote, ever.
@@ -2341,6 +2419,8 @@ def format_alert(hit: dict, crosses: str = "", confirmed: bool = True,
         lines.append(hit["place"])
     if crosses:
         lines.append(f"C/s {crosses}")
+    if unverified_crosses:
+        lines.append(f"Heard crosses (unverified): {unverified_crosses}")
     if not box and (hit.get("source") or "") == "fdny" and hit.get("box_heard"):
         lines.append(f"Box {hit['box_heard']} (heard; location not corroborated)")
     if box:
