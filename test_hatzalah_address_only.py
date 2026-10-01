@@ -28,6 +28,6 @@ class AddressOnly(unittest.IsolatedAsyncioTestCase):
             send.assert_not_awaited()
             self.assertEqual(hit['hold_reason'], 'no verified location')
     async def test_17_and_55_posts_with_real_intersection(self):
-        await self.check('Any units available for 17 and 55 for a trauma?', (40.626,-73.984), 'sent')
+        await self.check('Any units available for 17 and 55 for a full trauma?', (40.626,-73.984), 'sent')
     async def test_same_dispatch_holds_if_intersection_not_real(self):
-        await self.check('Any units available for 17 and 55 for a trauma?', (None,None), 'suppressed')
+        await self.check('Any units available for 17 and 55 for a full trauma?', (None,None), 'suppressed')
