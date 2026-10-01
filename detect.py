@@ -1082,7 +1082,7 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
             r"\b(\d{1,5})\s+(?:([a-z][a-z'\-]*(?:\s+[a-z][a-z'\-]*){0,2}"
             r"(?:\s+\d{1,2})?)\s+)?(?:(\d{1,3}(?:st|nd|rd|th))\s+)?"
             r"(street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
-            r"lane|ln|parkway|pkwy)\b", _norm(text).lower())
+            r"lane|ln|parkway|pkwy|way)\b", _norm(text).lower())
         if hn:
             w2 = (hn.group(2) or "").split()
             while w2 and w2[0] in _NAME_STOP:
@@ -1158,6 +1158,23 @@ def get_nature(text: str, profile: str = "") -> str:
             m = re.search(r"\border of gas\s+in\s+(?:the\s+)?(?:basement|cellar|area)\b", t)
             if m and not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$", t[max(0,m.start()-35):m.start()]):
                 return "Odor of Gas" + (", Basement" if "basement" in m[0] else ", Cellar" if "cellar" in m[0] else ", In the Area")
+    # Recorded medical readouts: retain spoken wording and uncertainty. These
+    # additions do not infer a diagnosis from an apparatus or routing request.
+    patterns = []
+    if profile == "hatzolah":
+        patterns = [r"\bpatient down from a height\b", r"\brenal colic\b",
+                    r"\b(?:probably\s+(?:just\s+)?(?:a\s+)?|possible\s+(?:a\s+)?)?lift assist\b"]
+    elif profile == "sullivan":
+        patterns = [r"\bcardiac problem\b"]
+    for pattern in patterns:
+        for m in re.finditer(pattern, t):
+            before = t[max(0, m.start()-40):m.start()]
+            if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$", before):
+                return _addr_title(m.group())
+    if profile == "fdny":
+        for m in re.finditer(r"\bfire in (?:a |the )?compactor\b|\bcompactor fire\b", t):
+            if not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+(?:\w+\s+){0,2}$", t[max(0,m.start()-40):m.start()]):
+                return _addr_title(m.group())
     # Retain the exact observed complaint, never a diagnosis or facility name.
     exact = (r"\bpediatric emergency\b" if profile == "hatzolah" else
              r"\b(?:oven|stove) fire\b" if profile == "fdny" else "")
@@ -1822,8 +1839,25 @@ def sullivan_numbered_jobs(text: str, profile: str) -> bool:
     """
     if profile.removeprefix("zello-") != "sullivan":
         return False
-    return bool(re.search(r"\b(?:second|third|fourth|2nd|3rd|4th)\s+(?:call|job)\b",
-                          text or "", re.I))
+    numbered = bool(re.search(r"\b(?:second|third|fourth|2nd|3rd|4th)\s+(?:call|job)\b",
+                              text or "", re.I))
+    if not numbered:
+        return False
+    # This recorded re-page names one patient site. "Second call" belongs
+    # to Bethel's mutual-aid crew routing, not a second patient address.
+    # Other numbered jobs, another opener or another house retain the hold.
+    routing = re.search(r"\bdispatch to Bethel,?\s+(?:a\s+)?second call,?\s+"
+                        r"mutual aid to Empress,?\s+County 5262,?\s+first response\b", text or "", re.I)
+    houses = {re.sub(r"\s+", " ", m.group().lower()) for m in re.finditer(
+        r"\b\d{1,5}\s+(?:[A-Za-z][A-Za-z'-]*\s+){1,4}"
+        r"(?:Street|St|Road|Rd|Avenue|Ave|Drive|Dr|Way|Lane|Ln)\b", text or "", re.I)}
+    if (routing and houses == {"10 pleasant street"}
+            and re.search(r"\bMonticello (?:Police Department|PD)\b", text, re.I)
+            and re.search(r"\bmale mental health emergency\b", text, re.I)
+            and not re.search(r"\b(?:first call|third call|fourth call|2 calls|two calls|another job|new call)\b", text, re.I)
+            and len(re.findall(r"\bsecond call\b", text, re.I)) == 1):
+        return False
+    return True
 
 
 def split_dispatch_jobs(text: str, profile: str) -> list[str]:
@@ -2397,7 +2431,7 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
     # callout, not a place (Sullivan 6:11 post 9/28). Real streets carry a
     # type token; type-less names like 'Broadway' survive (no digit/'The').
     _T_ANY = (r"\b(?:street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|place|pl|"
-              r"lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter|route)\b")
+              r"lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter|route|way)\b")
     if re.match(r"^(?:the\s+)?(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|"
                 r"place|pl|lane|ln|parkway|pkwy|highway|hwy|court|ct|terrace|ter)\s*$",
                 street_part, re.I):

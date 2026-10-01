@@ -43,7 +43,7 @@ def mixed(text, profile):
     # Do not attach a complaint to the first of two distinct full addresses.
     houses = {re.sub(r'\s+', ' ', m.group().lower()) for m in re.finditer(
         r'\b\d{1,5}(?:-\d{1,3})?\s+(?:(?:[A-Za-z][A-Za-z\'-]*|\d+(?:st|nd|rd|th)?)\s+){1,4}'
-        r'(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln)\b', text or '', re.I)}
+        r'(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Place|Pl|Lane|Ln|Way)\b', text or '', re.I)}
     return len(houses) > 1
 
 def one_candidate(text, profile):
