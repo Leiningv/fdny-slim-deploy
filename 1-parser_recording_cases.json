@@ -1,0 +1,67 @@
+[
+  {
+    "case": "Kingston",
+    "feed": "zello-hatzalah",
+    "text": "CH area for Kingston, Crown and Montgomery for a patient down on the street. 43 to the base, go ahead. 43, they're saying it's a patient down from a height in front of 399 Kingston Avenue. 43, 26 back"
+  },
+  {
+    "case": "Pleasant",
+    "feed": "zello-sullivan",
+    "text": "Sullivan County dispatch to Bethel, a full second crew is needed. Util aid to Empress, Monticello PD, 10 Pleasant Street for a male mental health emergency, a BLS response. Repeating, for Bethel, a fu"
+  },
+  {
+    "case": "SandSaint",
+    "feed": "fdny",
+    "text": "Brooklyn Phone Alarm Box 421, address is 191 Saint Street at Gold Street for a compacted fire. Brooklyn Phone Alarm Box 421, address is 191 Saint Street at Gold Street for a compacted fire. Units resp"
+  },
+  {
+    "case": "Kent",
+    "feed": "fdny",
+    "text": "Phone Alarm Box 301, 450 Kent Avenue, South 9 to South 10 Street, odor of smoke in the area. Phone Alarm Box 301, 450 Kent Avenue, South 9 to South 10, for odor of smoke in the area."
+  },
+  {
+    "case": "Tooth",
+    "feed": "zello-sullivan",
+    "text": "Sullivan dispatch to Empress A, calling the Village of Liberty, 204 South Main Street, the Liberty Motel, room 116 for a 63-year-old male, tooth pain, BLS response. For Empress A, calling the Village "
+  },
+  {
+    "case": "Cardiac",
+    "feed": "zello-sullivan",
+    "text": "Sullivan dispatch to Neversink County, 5264, an ALS assist, 100 Pine Road, for a 23-year-old female cardiac problem. A pride response for Neversink County, EMS 5264, an ALS assist, number 100 Pine"
+  },
+  {
+    "case": "Renal",
+    "feed": "zello-hatzalah",
+    "text": "133, you available for E7 Street, Robert and Sam? 133, respond to E7 Street, Robert and Sam. Pain management for patient with renal colic. 133."
+  },
+  {
+    "case": "Lift",
+    "feed": "zello-hatzalah",
+    "text": "Rockaway Lawrence 902 is headed to Central Avenue. 138. 140, Michael. Yeah, just come inside. It's probably just a lift assist. Can't hear a word you're saying. Time 5. Just come inside. No equipment "
+  },
+  {
+    "case": "Liberty",
+    "feed": "zello-sullivan",
+    "text": "Dispatch to Empress A, calling the Village of Liberty. 10 Liberty Commons Way, apartment 16, for a 69-year-old female fall victim. A BLS response. For Empress A, calling the Village of Liberty. Number 10 Liberty Commons Way, apartment 16, for a 69-year-old female victim. A BLS re"
+  },
+  {
+    "case": "PleasantRouting0",
+    "feed": "zello-sullivan",
+    "text": "Sullivan dispatch to Rock Hill, mutual aid to Empress, 10 Pleasant Street, Monticello PD for a male mental health emergency, APLS response. 2348 for Rock Hill, mutual aid to Empress, 10 Pleasant Stree"
+  },
+  {
+    "case": "PleasantRouting1",
+    "feed": "zello-sullivan",
+    "text": "Sullivan County dispatch to Bethel, a full second crew is needed. Util aid to Empress, Monticello PD, 10 Pleasant Street for a male mental health emergency, a BLS response. Repeating, for Bethel, a fu"
+  },
+  {
+    "case": "PleasantRouting2",
+    "feed": "zello-sullivan",
+    "text": "2 Empress, 10 Pleasant Street, Monticello PD for male mental health emergency, APLS response, 2342."
+  },
+  {
+    "case": "PleasantRouting3",
+    "feed": "zello-sullivan",
+    "text": "Sullivan dispatch to Bethel, a second call, mutual aid to Empress, County 5262, first response, Monticello Police Department, 10 Pleasant Street, male mental health emergency, APLS response. Repeating"
+  }
+]
