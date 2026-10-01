@@ -3232,15 +3232,16 @@ async def _fdny_audio_review(call: dict, original: dict | None, stats,
 
 async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                             send_lock: asyncio.Lock | None = None,
-                            correction_guard: CorrectionGuard | None = None) -> None:
+                            correction_guard: CorrectionGuard | None = None) -> str:
     if not call.get("_request_scoped"):
         spans = detect.split_dispatch_jobs(str(call.get("transcription") or ""), "fdny")
         if len(spans) > 1:
+            outcomes = []
             for index, span in enumerate(spans):
                 scoped = dict(call, transcription=span, _request_scoped=True,
                               id=str(call.get("id") or call.get("filename") or int(time.time())) + f"-request-{index}")
-                await _fdny_handle_call(scoped, stats, seen, tmp, send_lock, correction_guard)
-            return
+                outcomes.append(await _fdny_handle_call(scoped, stats, seen, tmp, send_lock, correction_guard))
+            return "uncertain" if any(o not in ("sent", "suppressed", "no_hit") for o in outcomes) else "sent" if "sent" in outcomes else "suppressed"
     stats.mark_segment("fdny")
     cid = str(call.get("id") or call.get("filename") or int(time.time()))
     text = (call.get("transcription") or "").strip()
@@ -3278,7 +3279,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             _fdny_call_record(call, text, None, hit, "suppressed", clip_problem)
             for suffix in (".m4a", ".wav"):
                 (tmp / f"{cid}{suffix}").unlink(missing_ok=True)
-            return
+            return "suppressed"
     if not text and wav is not None:
         if os.environ.get("FDNY_AUDIO_REVIEW", "0") == "1":
             text = await _bounded_second_listen(wav, "fdny", stats)
@@ -3301,7 +3302,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             stats.event("fdny", "held: " + problem)
             for suffix in (".m4a", ".wav"):
                 (tmp / f"{cid}{suffix}").unlink(missing_ok=True)
-            return
+            return "suppressed"
     clip_name = None
     if wav is not None:
         clip_name = f"fdny-{int(time.time())}-{re.sub(r'[^A-Za-z0-9_-]', '_', cid)[:40]}.wav"
@@ -3321,7 +3322,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
     if not text:
         _fdny_call_record(call, "", clip_name, None, "skipped", "no transcription")
         stats.event("fdny", "call with no transcription - detect skipped")
-        return
+        return "no_hit"
     if not hit and os.environ.get("FDNY_AUDIO_REVIEW", "0") == "1" and clip_name:
         import audio_review
         second = await _bounded_second_listen(ARCHIVE_DIR / clip_name, "fdny", stats)
@@ -3341,7 +3342,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                              outcome="suppressed", voice_url=(f"{os.environ.get('RENDER_EXTERNAL_URL', 'https://fdny-slim.onrender.com')}/audio/{clip_name}" if clip_name else ""), reason=why)
             stats.event("fdny", "Held: " + why)
         _fdny_call_record(call, text, clip_name, None, "skipped", "no parsed incident")
-        return
+        return "no_hit"
     # Verification and detail checks must use the same isolated request
     # that produced this candidate, not the preceding unit update.
     text = hit.get("dispatch_source_text") or text
@@ -3351,7 +3352,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
         logging.info("[fdny] deduped: %s @ %s", hit["nature"], hit["address"])
         stats.event("fdny", f"deduped: {hit['nature']} @ {hit['address']}")
         _fdny_call_record(call, text, clip_name, hit, "suppressed", "duplicate incident")
-        return
+        return "suppressed"
     seen[key] = now
     _save_seen(seen)
     # Keep explicit address-conflict and numbered-cross guards. A spoken
@@ -3459,7 +3460,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
                                    "address": hit["address"], "sent": True,
                                    "excerpt": hit["excerpt"]})
                 _fdny_call_record(call, text, clip_name, hit, "sent", "second listen")
-                return
+                return "sent"
         stats.event("fdny", f"held ({hold_reason}): {nature} @ {address}")
         ops_log(f"held ({hold_reason}): {nature} @ {address}")
         if os.environ.get("FDNY_AUDIO_REVIEW", "0") != "1" and (
@@ -3486,7 +3487,7 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
             stats.update_alert_recording("fdny", nature, address, audio_ref, published)
         hit["captured_ts"] = float(call.get("ts") or 0)
         await _post_held_review("fdny", hit, clip_name)
-        return
+        return "suppressed"
     try:
         call_ts = float(call.get("ts") or 0) or None
         audio_start = float(call.get("audio_start_ts") or 0) or None
@@ -3526,6 +3527,8 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
         await _post_held_review("fdny", hit, clip_name)
     logging.info("[fdny] ALERT %s @ %s - sent=%s", hit["nature"], hit["address"], ok)
 
+    return outcome if outcome in ("sent", "suppressed") else "uncertain"
+
 
 async def fdny_consumer(stats: Stats, seen: dict) -> None:
     """Process distinct Calls with a small concurrency bound. Only the
@@ -3549,8 +3552,19 @@ async def fdny_consumer(stats: Stats, seen: dict) -> None:
                 # The shared dedup state stays in the event loop. Each alert
                 # gets its own temp files by cid, with a send lock only at the
                 # final WhatsApp text/voice pair inside verify_and_send.
-                await _fdny_handle_call(call, stats, seen, tmp, send_lock=send_lock,
-                                        correction_guard=correction_guard)
+                import durable_claim_client
+                if durable_claim_client.configured():
+                    from receiver_claim import process_claimed
+                    async def handle_claimed(c):
+                        return await _fdny_handle_call(c, stats, seen, tmp,
+                            send_lock=send_lock, correction_guard=correction_guard)
+                    receipt = await process_claimed(call, durable_claim_client.Client(),
+                        os.environ.get("RENDER_INSTANCE_ID", "render"), handle_claimed)
+                    if receipt.get("status") not in ("complete", "duplicate"):
+                        stats.event("fdny", "durable claim hold: " + receipt.get("status", "unknown") + " id=" + cid)
+                else:
+                    await _fdny_handle_call(call, stats, seen, tmp, send_lock=send_lock,
+                                            correction_guard=correction_guard)
             except Exception as e:  # noqa: BLE001
                 logging.warning("[fdny] worker id=%s failed: %s", cid, e)
 
