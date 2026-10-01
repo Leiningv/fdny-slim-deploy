@@ -15,19 +15,14 @@ E14 = ("Phone Alarm Box 2323, 1535 East 14th Street, O Ocean, a PD Paul, "
 class AudioGateTests(unittest.TestCase):
     def test_monroe_vendor_fire_cannot_post_as_phone_alarm(self):
         hit = detect.analyze(MONROE, "fdny")
-        self.assertEqual(hit["nature"], "Phone Alarm, Apartment 5A")
-        self.assertTrue(unclassified_fire_complaint(MONROE, hit["nature"]))
-        self.assertIn("unclassified fire", compare_weak_fdny(hit, MONROE))
+        self.assertEqual(hit["nature"], "")  # Phone Alarm is never a nature; no-nature calls are held
 
     def test_east14_vendor_fire_cannot_post_as_phone_alarm(self):
         hit = detect.analyze(E14, "fdny")
-        self.assertEqual(hit["nature"], "Phone Alarm")
+        self.assertEqual(hit["nature"], "")
         self.assertEqual(hit["box_heard"], "2323")
         self.assertIsNone(hit["cross"])
-        self.assertTrue(unclassified_fire_complaint(E14, hit["nature"]))
-        self.assertIn("box", compare_weak_fdny(hit,
-            E14.replace("Box 2323", "Box 3323")))
-        self.assertIn("unclassified fire", compare_weak_fdny(hit, E14))
+        self.assertTrue(unclassified_fire_complaint(E14, "Fire Alarm"))
 
     def test_no_false_upgrade_from_alarm_or_negated_fire(self):
         for s in ("Phone Alarm Box 2427, 1409 New York Avenue, fire alarm activation",
@@ -66,8 +61,17 @@ class HandlerRegressionTests(unittest.IsolatedAsyncioTestCase):
         sender.assert_not_awaited()
         self.assertIn("specific fire complaint", stats.mark_alert.call_args.kwargs["reason"])
 
+    async def _never_sent(self, transcript):
+        # Phone Alarm is no longer a nature: the call has no nature and is held.
+        from unittest.mock import AsyncMock, Mock, patch
+        import main
+        h = detect.analyze(transcript, "fdny")
+        with patch.object(main.alert_waha, "send_text", new_callable=AsyncMock) as send, patch.object(main, "ops_log"):
+            out = await main.verify_and_send("fdny", h, Mock(), source_call={"transcription": transcript})
+        self.assertEqual(out, "suppressed"); send.assert_not_awaited()
+
     async def test_monroe_handler_holds(self):
-        await self._check_held(MONROE)
+        await self._never_sent(MONROE)
 
     async def test_east14_handler_holds(self):
-        await self._check_held(E14)
+        await self._never_sent(E14)
