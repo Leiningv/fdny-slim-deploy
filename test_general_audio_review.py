@@ -73,7 +73,7 @@ class Workflow(unittest.IsolatedAsyncioTestCase):
             _,reason=await main._fdny_audio_review({'ts':time.time()-700},None,Mock(),'a.wav','')
         self.assertIn('stale',reason);ear.assert_not_awaited()
     async def test_prepare_mode_never_sends(self):
-        h=detect.analyze('Any units to 17 and 55 for a trauma?','zello-hatzalah')
+        h=detect.analyze('Any units to 17 and 55 for a full trauma?','zello-hatzalah')
         with (patch.object(main,'_hatzalah_point_area',new_callable=AsyncMock,return_value='Brooklyn'),
               patch.object(main,'_intersection_point',new_callable=AsyncMock,return_value=(40.63,-73.99)),
               patch.object(main,'_cross_streets',new_callable=AsyncMock,return_value=(None,False)),
