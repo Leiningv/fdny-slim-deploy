@@ -129,7 +129,9 @@ def unnumbered_with_spoken_building(transcript: str, parsed_address: str) -> str
     if re.match(r"^\s*\d{1,5}(?:-\d{1,4})?[A-Za-z]?\s+", parsed_address):
         return ""
     for match in _NUMBERED_BUILDING.finditer(transcript):
-        prefix = transcript[max(0, match.start() - 7):match.start()]
+        prefix = transcript[max(0, match.start() - 24):match.start()]
+        if re.search(r"\bexposure\s*$",prefix,re.I):
+            continue
         if re.search(r"\bbox\s*$", prefix, re.I):
             continue
         # "East 12 to Coney Island Avenue" is a cross-road corridor,
