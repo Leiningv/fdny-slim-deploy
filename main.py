@@ -2298,14 +2298,34 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     # A verified address is mandatory. A box alone cannot rehabilitate an
     # unverified ASR road spelling. A mismatched box is omitted, not swapped
     # for another guessed box; an absent box is never guessed.
-    if not verified:
+    soft_unverified = False
+    if (not verified and os.environ.get("POST_UNVERIFIED_STREET", "1") == "1"
+            and not hit.get("box_glue_ambiguous")
+            and (hit.get("nature") or "").strip()
+            and not re.match(r"^(?:phone alarm|fire alarm|automatic alarm|alarm activation|class 3|code)\b",
+                             hit["nature"], re.I)
+            and not hit.get("hold_reason")
+            and profile == "fdny"
+            and re.fullmatch(r"(?:[A-Za-z0-9'.-]+\s+){0,3}(?:Street|St|Avenue|Ave|Road|Rd|Parkway|Pkwy|Boulevard|Blvd|"
+                             r"Expressway|Drive|Place|Lane|Highway|Bridge|Tunnel|Turnpike|Way|Court),\s*"
+                             r"(?:Brooklyn|Queens|Manhattan|Bronx|Staten Island),\s*NY",
+                             hit.get("address") or "", re.I)
+            and not re.match(r"^\d", hit.get("address") or "")
+            and "&" not in (hit.get("address") or "")):
+        # User instruction (relayed by main 10/1 23:12 EEST): when the address
+        # cannot be resolved, still post what was heard (street + nature),
+        # clearly marked not confirmed, instead of holding.
+        soft_unverified = True
+        stats.event(profile, f"posting unconfirmed street: {hit['nature']} @ {hit['address']}")
+        ops_log(f"posting unconfirmed street: {hit['nature']} @ {hit['address']}")
+    if not verified and not soft_unverified:
         reason = "unconfirmed, no box" if profile == "fdny" else "no verified location"
         logging.info("[%s] suppressed (%s): %s", profile, reason, hit["address"])
         stats.event(profile, f"Held: Heard {hit['address']}, but could not verify that location for {hit['nature']}.")
         ops_log(f"Held: Heard {hit['address']}, but could not verify that location for {hit['nature']}.")
         hit["hold_reason"] = reason
         return "suppressed"
-    if profile == "fdny" and GEOCODE_VERIFY and not highway_area_exception:
+    if profile == "fdny" and GEOCODE_VERIFY and not highway_area_exception and not soft_unverified:
         from fdny_borough_gate import exact_numbered_fdny_match
         if not exact_numbered_fdny_match(hit["address"], verified_label):
             reason = "map did not confirm the exact FDNY house and street"

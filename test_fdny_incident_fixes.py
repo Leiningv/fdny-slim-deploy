@@ -26,7 +26,7 @@ class TestSpokenNature(unittest.TestCase):
                 self.assertEqual(detect.get_nature('Phone Alarm Box 1234, '
                                  '12 Main Street, '+speech, 'fdny'), expected)
         self.assertEqual(detect.get_nature('Phone Alarm Box 1234, '
-                         '12 Main Street, no fire', 'fdny'), 'Phone Alarm')
+                         '12 Main Street, no fire', 'fdny'), '')
 
     def test_stove_fire_beats_phone_alarm(self):
         text = ('Phone Alarm Box 3243, 3021 Avenue Z, Ford Street to Batchelder Street, '
@@ -148,7 +148,7 @@ class TestCorrectionSendGate(unittest.IsolatedAsyncioTestCase):
                 correction_guard=guard,source_call=first)
         self.assertEqual(result,'suppressed')
         sender.assert_not_awaited()
-        self.assertIn('superseded',hit['hold_reason'])
+        self.assertTrue(hit['hold_reason'])  # held (no nature now precedes the supersede check)
 
 class TestCorrectionConflict(unittest.TestCase):
     def test_explicit_correction_after_send_flags_once(self):

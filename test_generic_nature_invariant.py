@@ -6,7 +6,7 @@ ACTUAL="Phone Alarm's going to work, Box 3047, tentative address of 1878 New Yor
 class Invariant(unittest.TestCase):
     def test_actual_degraded_fixture(self):
         h=detect.analyze(ACTUAL,'fdny')
-        self.assertTrue(gate.generic_nature_invariant(ACTUAL,h['nature']))
+        self.assertEqual(h['nature'],'');self.assertTrue(gate.generic_nature_invariant(ACTUAL,'Phone Alarm'))
     def test_every_class_and_fallback(self):
         for phrase in ['all hands','all-hands','going to work','working fire','10-75','10 75','1075','private dwelling','multiple dwelling','fire in rear']:
             for nature in ['Phone Alarm','Automatic Alarm','Fire Alarm','Alarm Activation','Class 3','Fire']:

@@ -1502,6 +1502,26 @@ def get_nature(text: str, profile: str = "") -> str:
         vehicle_fire = re.search(r"\b(?:truck|car|vehicle)\s+fire\b", t)
         if vehicle_fire:
             return _addr_title(vehicle_fire.group(0))
+    # Water rescues are eligible natures (user instruction relayed by main, 10/1 23:12 EEST).
+    if not _negative_fire_context(t):
+        water = re.search(
+            r"\b(?:(?:person|man|woman|male|female|child|kid|body|jumper|swimmer|diver|boater|vehicle|car)s?\s+(?:is\s+|are\s+)?(?:in|into)\s+the\s+water|"
+            r"(?:swift\s+water\s+rescue|water\s+rescue|ice\s+rescue)|"
+            r"(?:person|persons|swimmer|boater|boat|vessel)\s+in\s+distress\s+(?:in|on)\s+the\s+water|"
+            r"(?:boat|vessel)\s+(?:in\s+distress|capsized|sinking)|"
+            r"capsized\s+(?:boat|vessel)|jumper\s+in\s+the\s+water|"
+            r"person\s+(?:in\s+the\s+)?(?:river|bay|canal|creek|lake|pond))\b", t)
+        if water and not re.search(r"\b(?:no|not|without|negative|test|training|drill)\s+$",
+                                   t[max(0, water.start()-12):water.start()]):
+            w = re.sub(r"\s+", " ", water.group(0)).strip()
+            w = re.sub(r"^(?:persons?|man|woman|male|female|child|kid|body|jumper|swimmer|diver|boater|vehicle|car)s?\s+(?:is\s+|are\s+)?(?:in|into)\s+the\s+water$",
+                       lambda m: ("Person in the Water" if not re.match(r"(?:vehicle|car)", m.group(0), re.I) else "Vehicle in the Water"), w, flags=re.I)
+            return _addr_title(w)
+    # A spoken smoking/smoke-in-apartment complaint is a smoke job.
+    if profile == "fdny" and not _negative_fire_context(t):
+        smk_apt = re.search(r"\b(?:smoking|smoke\s+in|smoke\s+condition\s+in)\s+(?:the\s+)?apartment\b(?P<rest>\s+\d{1,3}\s*[a-z]?\b)?", t)
+        if smk_apt:
+            return "Smoke" if smk_apt.group("rest") else "Smoke in Apartment"
     v = vt(r"\b(?:rubbish fire|garbage fire|trash fire|rubbish)\b")
     if v: return v
     v = vt(r"\b(?:outside fire|brush fire)\b")
@@ -1588,8 +1608,8 @@ def get_nature(text: str, profile: str = "") -> str:
         return "Automatic Alarm" if profile == "fdny" else _addr_title(m3.group(0))
     v = vt(r"\bstill alarm\b")
     if v: return v
-    v = vt(r"\bphone alarm\b")
-    if v: return v
+    # "Phone alarm" is the box/transmission type, never a nature (owner ruling
+    # 10/1 23:12 EEST). Without a spoken complaint the nature stays empty.
     # EMS/ambulance/BLS are apparatus or response language, not a complaint.
     # A job without a discernible complaint stays suppressed by verify_and_send.
     v = vt(r"\b(?:sick person|medical emergency)\b")
@@ -2702,4 +2722,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
         "suffixless_spoken_address": suffixless,
-    }
+}

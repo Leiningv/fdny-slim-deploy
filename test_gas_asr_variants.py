@@ -9,8 +9,8 @@ class GasVariants(unittest.TestCase):
     def test_zero_odor_uncertain_not_upgraded(self):
         t='Phone Alarm Box 3282, East 29th Street, Avenue Z, zero odor, gas in the area.'
         h=detect.analyze(t,'fdny')
-        self.assertEqual(h['nature'],'Phone Alarm')
-        self.assertTrue(fdny_audio_gate.generic_nature_invariant(t,h['nature']))
+        self.assertEqual(h['nature'],'')
+        self.assertTrue(fdny_audio_gate.generic_nature_invariant(t,'Phone Alarm'))
     def test_variants_veto_fallback(self):
         self.assertTrue(fdny_audio_gate.generic_nature_invariant('order of gas in basement','Phone Alarm'))
     def test_negatives_not_promoted(self):
