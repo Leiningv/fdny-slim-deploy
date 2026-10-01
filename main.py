@@ -629,6 +629,28 @@ async def _hatzalah_point_area(lat: float, lon: float, address: str, defaulted: 
         return ""
 
 async def _intersection_point(address: str, cross: str) -> tuple:
+    if os.environ.get("GOOGLE_EXACT_INTERSECTION_FALLBACK", "0") != "1":
+        return await _osm_intersection_point(address, cross)
+    import google_intersection
+    # No speculative Google call on the normal successful route.
+    candidate = address
+    if not google_intersection.query(candidate):
+        parts = address.split(",",1)
+        if len(parts) == 2 and "&" not in parts[0] and "between" not in parts[0].lower():
+            candidate = f"{parts[0].strip()} & {cross.strip()}, {parts[1].strip()}"
+        if not google_intersection.query(candidate):
+            return await _osm_intersection_point(address, cross)
+    result = await _osm_intersection_point(address, cross)
+    if result[0] is not None:
+        return result
+    # Exact intersection query only. This is not a bare-road centroid fallback.
+    started = time.monotonic()
+    point = await google_intersection.lookup(candidate, timeout=1.5)
+    logging.info("exact Google intersection fallback elapsed=%.3fs verified=%s", time.monotonic()-started, bool(point))
+    return point if point else (None, None)
+
+
+async def _osm_intersection_point(address: str, cross: str) -> tuple:
     """Bare-street verification: the heard street truly crosses a spoken cross
     street (shared OSM way node) -> (lat, lon) of a shared node, else
     (None, None). '15th & 16th Avenue' shares its suffix with the bare side."""
@@ -1430,19 +1452,25 @@ async def _hatzalah_brooklyn_grid_corridor(hit: dict) -> tuple | None:
     if re.search(r"\b(?:queens|bronx|manhattan|staten island|nassau|rockland|"
                  r"sullivan|new jersey|nj|five towns|long island)\b", text, re.I):
         return None
-    m = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th) (?:Ave|Avenue) between "
+    m = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th) (Ave|Avenue|St|Street) between "
                      r"(\d{1,3})(?:st|nd|rd|th) & (\d{1,3})(?:st|nd|rd|th) "
-                     r"(?:St|Street), Brooklyn, NY", hit.get("address") or "", re.I)
+                     r"(St|Street|Ave|Avenue), Brooklyn, NY", hit.get("address") or "", re.I)
     if not m:
         return None
-    avenue, first, second = map(int, m.groups())
-    if not (1 <= avenue <= 25 and 35 <= first <= 65 and second == first + 1):
+    primary, primary_type, first, second, cross_type = m.groups()
+    primary, first, second = map(int,(primary,first,second))
+    avenue_main = primary_type.lower() in ("ave","avenue")
+    if avenue_main:
+        valid = cross_type.lower() in ("st","street") and 1 <= primary <= 25 and 35 <= first <= 65
+    else:
+        valid = cross_type.lower() in ("ave","avenue") and 35 <= primary <= 65 and 1 <= first <= 25
+    if not valid or second != first + 1:
         return None
     from detect import _ordinal_street_num
-    road = f"{_ordinal_street_num(avenue)} Avenue, Brooklyn, NY"
+    road = f"{_ordinal_street_num(primary)} {'Avenue' if avenue_main else 'Street'}, Brooklyn, NY"
     try:
         points = await asyncio.gather(*(
-            asyncio.wait_for(_intersection_point(road, f"{_ordinal_street_num(st)} Street"), timeout=18)
+            asyncio.wait_for(_intersection_point(road, f"{_ordinal_street_num(st)} {'Street' if avenue_main else 'Avenue'}"), timeout=18)
             for st in (first, second)))
     except Exception:
         return None
