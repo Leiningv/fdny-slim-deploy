@@ -2311,6 +2311,8 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                              r"(?:Brooklyn|Queens|Manhattan|Bronx|Staten Island),\s*NY",
                              hit.get("address") or "", re.I)
             and not re.match(r"^\d", hit.get("address") or "")
+            and not re.match(r"^address\b", hit.get("address") or "", re.I)
+            and not re.search(r"\b\d{4,}\b", (hit.get("address") or "").split(",")[0])
             and "&" not in (hit.get("address") or "")):
         # User instruction (relayed by main 10/1 23:12 EEST): when the address
         # cannot be resolved, still post what was heard (street + nature),
@@ -2360,6 +2362,12 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                    _street_key(label_house_road)):
             hit["hold_reason"] = "locality repeat exact house not verified"
             return "suppressed"
+    if soft_unverified and not box_disp:
+        # Soft post with a street only: the box check failed, so do not
+        # print the heard box or crosses; they would look corroborated.
+        cross = ""
+        unverified_crosses = ""
+        hit = dict(hit, box_heard="")
     text_out = format_alert(hit, crosses=cross, unverified_crosses=unverified_crosses,
                             confirmed=verified, footer=colony,
                             box=box_disp if profile == "fdny" else "",
