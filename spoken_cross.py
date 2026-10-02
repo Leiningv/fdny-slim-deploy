@@ -33,39 +33,108 @@ def normalize_pair(sides):
     return sides
 
 
+_TYPES = {"ave", "st", "rd", "blvd", "pl", "dr", "ct", "ln", "pkwy", "hwy", "ter", "way", "sq", "expy"}
+_MAP_CACHE: dict = {}
+
+
+def _lev1(a: str, b: str) -> bool:
+    """True when a and b differ by at most one insert, delete or substitution."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) <= 1
+    if len(a) > len(b):
+        a, b = b, a
+    i = 0
+    while i < len(a) and a[i] == b[i]:
+        i += 1
+    return a[i:] == b[i + 1:]
+
+
+def same_road(heard: str, mapped: str) -> bool:
+    """Exact normalized match, or a one-letter spelling slip in the name
+    ("Green Avenue" heard, "Greene Avenue" mapped). Same road type required,
+    numbered streets must match exactly, and short names must match exactly."""
+    a, b = _road(heard), _road(mapped)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    a = a.replace("'", "").replace(".", "")
+    b = b.replace("'", "").replace(".", "")
+    if a == b:
+        return True
+    ta, tb = a.split(), b.split()
+    if len(ta) < 2 or len(tb) < 2 or ta[-1] != tb[-1] or ta[-1] not in _TYPES:
+        return False
+    na, nb = " ".join(ta[:-1]), " ".join(tb[:-1])
+    if re.search(r"\d", na + nb):
+        return False
+    if len(na) < 5 or len(nb) < 5:
+        return False
+    return _lev1(na, nb)
+
+
+async def _fetch_map(bbox: str):
+    """OSM map XML for bbox, cached briefly so two crosses cost one download."""
+    import time
+    hit = _MAP_CACHE.get(bbox)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    async with aiohttp.ClientSession(headers={"User-Agent": "fdny-slim/1.0 (dispatch cross check)"}) as s:
+        async with s.get('https://www.openstreetmap.org/api/0.6/map', params={'bbox': bbox},
+                         timeout=aiohttp.ClientTimeout(total=9)) as r:
+            if r.status != 200:
+                return None
+            blob = await r.read()
+            if len(blob) > 3_000_000:
+                return None
+    if len(_MAP_CACHE) > 20:
+        _MAP_CACHE.clear()
+    _MAP_CACHE[bbox] = (time.time(), blob)
+    return blob
+
+
 async def verify(street: str, cross: str, lat: float, lon: float) -> bool:
     """True iff distinct named road ways share a node within 250m of address.
-    No source/map failure is a pass. Aimed at display, not location creation.
+    Names match exactly or with a one-letter spelling slip (same_road).
+    A source/map failure is NOT a pass: it returns False. Display only.
     """
     if not street or not cross or lat is None or lon is None:
         return False
-    # A ~300m box is narrow enough for address-nearby crosses and well below
-    # the OSM map endpoint's maximum allowed bounding box.
-    delta_lat=0.0027
-    delta_lon=0.0036
-    bbox=f'{lon-delta_lon},{lat-delta_lat},{lon+delta_lon},{lat+delta_lat}'
+    delta_lat = 0.0027
+    delta_lon = 0.0036
+    # Round the box so the two crosses of one call share a single download.
+    bbox = f'{round(lon-delta_lon, 4)},{round(lat-delta_lat, 4)},{round(lon+delta_lon, 4)},{round(lat+delta_lat, 4)}'
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get('https://www.openstreetmap.org/api/0.6/map',params={'bbox':bbox},
-                             timeout=aiohttp.ClientTimeout(total=9)) as r:
-                if r.status!=200:return False
-                blob=await r.read()
-                if len(blob)>3_000_000:return False
-        root=ET.fromstring(blob)
+        blob = await _fetch_map(bbox)
+        if not blob:
+            return False
+        root = ET.fromstring(blob)
     except Exception:
         return False
-    coords={n.attrib['id']:(float(n.attrib['lat']),float(n.attrib['lon'])) for n in root.findall('node')}
-    roads={_road(street):set(),_road(cross):set()}
+    coords = {n.attrib['id']: (float(n.attrib['lat']), float(n.attrib['lon'])) for n in root.findall('node')}
+    if _road(street) == _road(cross):
+        return False
+    a_nodes, b_nodes = set(), set()
     for way in root.findall('way'):
-        tags={x.attrib['k']:x.attrib['v'] for x in way.findall('tag')}
-        name=_road(tags.get('name',''))
-        if name in roads and tags.get('highway'):
-            roads[name].update(x.attrib['ref'] for x in way.findall('nd'))
-    if _road(street)==_road(cross):return False
-    for node in roads[_road(street)]&roads[_road(cross)]:
-        if node not in coords:continue
-        a,b=coords[node]
-        dlat=(a-lat)*110540
-        dlon=(b-lon)*111320*math.cos(math.radians(lat))
-        if math.hypot(dlat,dlon)<=250:return True
+        tags = {x.attrib['k']: x.attrib['v'] for x in way.findall('tag')}
+        name = tags.get('name', '')
+        if not name or not tags.get('highway'):
+            continue
+        refs = [x.attrib['ref'] for x in way.findall('nd')]
+        if same_road(street, name):
+            a_nodes.update(refs)
+        if same_road(cross, name) and not same_road(street, name):
+            b_nodes.update(refs)
+    for node in a_nodes & b_nodes:
+        if node not in coords:
+            continue
+        a, b = coords[node]
+        dlat = (a - lat) * 110540
+        dlon = (b - lon) * 111320 * math.cos(math.radians(lat))
+        if math.hypot(dlat, dlon) <= 250:
+            return True
     return False

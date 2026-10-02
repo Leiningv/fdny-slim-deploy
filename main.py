@@ -3236,6 +3236,31 @@ def _fdny_clip_sanity(wav: Path | None, transcript: str) -> str:
     return ""
 
 
+async def _numbered_cross_map_verified(address: str, cross: str) -> bool:
+    """True only if every directional-numbered side of the heard cross is a
+    real road meeting the address road in the OSM map near the address.
+    Any failure is not a pass."""
+    import spoken_cross as crossmap
+    num = re.compile(r"^(?:East|West|North|South|E|W|N|S)\s+\d{1,3}(?:st|nd|rd|th)?\s+"
+                     r"(?:Street|St|Avenue|Ave|Road|Rd)$", re.I)
+    sides = [p.strip() for p in (cross or "").split("&") if p.strip()]
+    numbered = [p for p in sides if num.match(p)]
+    if not numbered or not address:
+        return False
+    try:
+        ok, _s, _l, lat, lon, _loc = await asyncio.wait_for(
+            geocode_verify(address, "fdny"), timeout=12)
+        if not ok or lat is None or lon is None:
+            return False
+        base = re.sub(r"^\s*\d+[A-Za-z-]*\s+", "", address.split(",")[0])
+        for side in numbered:
+            if not await asyncio.wait_for(crossmap.verify(base, side, lat, lon), timeout=12):
+                return False
+    except Exception:
+        return False
+    return True
+
+
 async def _fdny_audio_review(call: dict, original: dict | None, stats,
                              clip_name: str, reason: str,
                              send_lock=None, correction_guard=None) -> tuple[dict | None, str]:
@@ -3423,10 +3448,16 @@ async def _fdny_handle_call(call: dict, stats: Stats, seen: dict, tmp: Path,
     # A single vendor ASR reading can drop a digit in a numbered cross (East
     # 22nd -> East 2nd). Without a second audio recognizer on the free tier,
     # hold that location detail instead of publishing a false block.
+    # A numbered cross posts when a map check proves
+    # that exact numbered street really meets the address road. Garbled or
+    # unmatched numbered crosses still hold.
     if not hold_reason and re.search(
             r"\b(?:East|West|North|South|E|W|N|S)\s+\d{1,3}(?:st|nd|rd|th)?\s+"
             r"(?:Street|St|Avenue|Ave|Road|Rd)\b", hit.get("cross") or "", re.I):
-        hold_reason = "FDNY numbered cross street needs an independent audio check"
+        if not await _numbered_cross_map_verified(hit.get("address") or "", hit.get("cross") or ""):
+            hold_reason = "FDNY numbered cross street needs an independent audio check"
+        else:
+            stats.event("fdny", f"numbered cross map-verified: {hit.get('cross')}")
     # Vendor ASR can turn a second numbered house at a corner into a
     # plausible numbered cross (1615 8th Ave / 1632 Windsor Place was read
     # as 16th Street to Windsor Place). A map hit on the primary address

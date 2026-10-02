@@ -1431,6 +1431,8 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\bfire\s+in\s+a\s+private\s+dwelling\b|\bprivate\s+dwelling\s+fire\b")
     if v: return v
+    v = vt(r"\bfire\s+in\s+a\s+dwelling\b|\bdwelling\s+fire\b")
+    if v: return v
     v = vt(r"\bpossible structure fire\b")
     if v: return v
     v = vt(r"\b(?:structure|building|house)\s+fire\b")
