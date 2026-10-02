@@ -40,7 +40,7 @@ EMERGENCY_PATTERNS = [
     r"\b(?:cross\s+of|corner\s+of|between|intersection\s+of)\b",
     r"\b(?:turnpike|parkway|terrace|boulevard|drive|lane|court|place)\b",
     r"\b(?:hatzalah|hatz|chevra)\s+(?:to|on|at)\b",
-    r"\b(?:allergic|anaphylaxis|epi\s*pen|overdose|unresponsive|syncope|fall|bleeding|abdominal)\b",
+    r"\b(?:allergic|anaphylaxis|epi\s*pen|overdose|unresponsive|syncope|syncopal|fall|bleeding|abdominal)\b",
     r"\b(?:full\s+trauma|trauma|traumatic)\b",
     r"\b(?:general(?:ly)?\s+ill|general\s+illness)\b",
     r"\b(?:tree|trees|limb|branch).{0,35}(?:wire|wires|power\s*line|utility\s*line).{0,35}(?:down|burn|burning|fallen|arcing|spark)\b",
@@ -1419,7 +1419,7 @@ def get_nature(text: str, profile: str = "") -> str:
     if v: return v
     v = vt(r"\bdrown\w*\b")
     if v: return v
-    v = vt(r"\b(?:near syncope|syncope|faint(?:ed|ing)?|passed out)\b")
+    v = vt(r"\b(?:near syncope|syncope|syncopal(?:\s+episode)?|faint(?:ed|ing)?|passed out)\b")
     if v: return v
     v = vt(r"\bdiabet\w*\b|\b(?:low|high)\s+(?:blood\s+)?sugar\b")
     if v: return v
