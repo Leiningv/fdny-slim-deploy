@@ -899,6 +899,14 @@ _LONE_STREET_RE = re.compile(
     r"Cir(?:cle)?|Hwy|Highway|Tpke|Turnpike))\b", re.I)
 
 
+def _street_number_on_ordinal(hn, nm: str, ordw: str) -> bool:
+    """'84 on 3rd Avenue' is the corner of East 84th and Third, never house 84
+    on Third Avenue: only a connector word sat between a street-sized number
+    and a numbered avenue."""
+    return bool(ordw and not nm and (hn.group(2) or "").strip()
+                and int(hn.group(1)) <= 199)
+
+
 def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None:
     """Best-effort dispatch location for one transcript chunk."""
     if profile == "sullivan":
@@ -1081,7 +1089,7 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
                     return _with_area(f"{hn.group(1)} {_addr_title(' '.join(w2[:k+1]))}", profile, text)
             nm = " ".join(w2)
             ordw = hn.group(3) or ""
-            if (nm and nm not in _NAME_STOP) or ordw:
+            if ((nm and nm not in _NAME_STOP) or ordw) and not _street_number_on_ordinal(hn, nm, ordw):
                 typ = {"st": "street", "ave": "avenue", "rd": "road", "dr": "drive",
                        "blvd": "boulevard", "pl": "place", "ln": "lane",
                        "pkwy": "parkway"}.get(hn.group(4), hn.group(4))
@@ -1130,7 +1138,7 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
                 w2.pop(0)
             nm = " ".join(w2)
             ordw = hn.group(3) or ""
-            if (nm and nm not in _NAME_STOP) or ordw:
+            if ((nm and nm not in _NAME_STOP) or ordw) and not _street_number_on_ordinal(hn, nm, ordw):
                 typ = {"st": "street", "ave": "avenue", "rd": "road", "dr": "drive",
                        "blvd": "boulevard", "pl": "place", "ln": "lane",
                        "pkwy": "parkway"}.get(hn.group(4), hn.group(4))
@@ -2769,4 +2777,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
         "suffixless_spoken_address": suffixless,
-}
+    }
