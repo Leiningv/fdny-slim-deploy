@@ -1558,6 +1558,12 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["hold_reason"] = "FDNY Bronx expressway spoken; Brooklyn street address unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
+    _east = re.match(r"^\s*(?:\d+[A-Za-z-]*\s+)?East\s+(\d+)(?:st|nd|rd|th)?\s+(?:Street|St)\b", hit.get("address") or "", re.I)
+    if (profile == "fdny" and _east and int(_east.group(1)) >= 110
+            and re.search(r",\s*Brooklyn,\s*NY\s*$", hit.get("address") or "", re.I)):
+        hit["hold_reason"] = "FDNY East street above 108 is not in Brooklyn; borough unverified"
+        stats.event(profile, "Held: " + hit["hold_reason"])
+        return "suppressed"
     if (re.match(r"^(?:said|says|okay|copy|respond|responding|reporting)\b", _spoken_street, re.I)
             or re.match(r"^[A-Za-z]+\s+the\s+(?:Road|Street|Avenue|Ave|Rd|St)$", _spoken_street)):
         hit["hold_reason"] = "street name is not a plausible street; location unverified"
