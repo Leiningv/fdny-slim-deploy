@@ -1565,7 +1565,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
     if (re.match(r"^(?:said|says|okay|copy|respond|responding|reporting)\b", _spoken_street, re.I)
-            or re.match(r"^[A-Za-z]+\s+the\s+(?:Road|Street|Avenue|Ave|Rd|St)$", _spoken_street)):
+            or re.match(r"^[A-Za-z]+\s+the\s+(?:Road|Street|Avenue|Ave|Rd|St|Highway|Hwy|Parkway|Pkwy|Boulevard|Blvd|Expressway|Place|Drive)$", _spoken_street)):
         hit["hold_reason"] = "street name is not a plausible street; location unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
