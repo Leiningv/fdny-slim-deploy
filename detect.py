@@ -500,6 +500,7 @@ _NAME_STOP = {
     "with", "of", "by", "go", "no", "we", "you", "your", "rd", "st", "nd",
     "th", "ave", "man", "that", "thats", "that's", "off", "corner", "near",
     "next", "up", "out", "just", "right", "fire", "smoke", "it's", "its",
+    "address", "location",
 }
 
 
@@ -2778,4 +2779,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
         "suffixless_spoken_address": suffixless,
-        }
+}
