@@ -958,14 +958,15 @@ def extract_dispatch_address(text: str, profile: str = "hatzolah") -> str | None
         # road. Require a separate house and explicit road type; the sender
         # must still verify the exact mapped house before any alert.
         number_street = re.search(
-            r"\b(\d{1,5})\s+Number\s+(\d{1,3})(?:st|nd|rd|th)?\s+"
+            r"\b(\d{1,5})\s+(?:(North|South|East|West)\s+)?Number\s+(\d{1,3})(?:st|nd|rd|th)?\s+"
             r"(Street|St|Avenue|Ave)\b", _norm(text), re.I)
         if number_street:
-            n = int(number_street.group(2))
+            n = int(number_street.group(3))
             if 1 <= n <= 150:
                 suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-                road = "Street" if number_street.group(3).lower() in ("st", "street") else "Avenue"
-                return _with_area(f"{number_street.group(1)} {n}{suffix} {road}", profile, text)
+                road = "Street" if number_street.group(4).lower() in ("st", "street") else "Avenue"
+                direction = f"{number_street.group(2).title()} " if number_street.group(2) else ""
+                return _with_area(f"{number_street.group(1)} {direction}{n}{suffix} {road}", profile, text)
         # ASR may omit the ordinal suffix inside a numbered South street:
         # "330 South 3 Street". A distinct house number before the road is
         # stronger than a later bare "Box 231, 330 South 3" readout. Keep
@@ -2777,4 +2778,4 @@ def analyze(text: str, profile: str = "hatzolah") -> dict | None:
         "terminal_street_box_correlated": bool(terminal_street),
         "box_only": box_only,
         "suffixless_spoken_address": suffixless,
-    }
+        }
