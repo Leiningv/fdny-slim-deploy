@@ -1551,6 +1551,18 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["hold_reason"] = "Hatzalah distinct UWS/Broadway request; complaint/address pairing unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
+    _spoken_street = re.sub(r"^\s*\d+[A-Za-z-]*\s+", "", (hit.get("address") or "").split(",", 1)[0]).strip()
+    if (profile == "fdny"
+            and re.search(r"\b(?:Cross Bronx|Major Deegan|Deegan|Bronx River (?:Parkway|Pkwy)|Bruckner|Hutchinson River|Sheridan)\b", source_text, re.I)
+            and not re.search(r"\b(?:Cross Bronx|Major Deegan|Deegan|Bronx River|Bruckner|Hutchinson River|Sheridan)\b", hit.get("address") or "", re.I)):
+        hit["hold_reason"] = "FDNY Bronx expressway spoken; Brooklyn street address unverified"
+        stats.event(profile, "Held: " + hit["hold_reason"])
+        return "suppressed"
+    if (re.match(r"^(?:said|says|okay|copy|respond|responding|reporting)\b", _spoken_street, re.I)
+            or re.match(r"^[A-Za-z]+\s+the\s+(?:Road|Street|Avenue|Ave|Rd|St)$", _spoken_street)):
+        hit["hold_reason"] = "street name is not a plausible street; location unverified"
+        stats.event(profile, "Held: " + hit["hold_reason"])
+        return "suppressed"
     if (profile.removeprefix("zello-") == "hatzalah" and not hit.get("cross")
             and re.match(r"^\s*\d+(?:st|nd|rd|th)?\s+Ave(?:nue)?\s*(?:,|$)", hit.get("address") or "", re.I)
             and re.search(r"\b(?:\d+(?:st|nd|rd|th)?|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+Ave(?:nue)?\s+in\s+(?:Queens|Brooklyn|the Bronx|Bronx|Manhattan|Staten Island)\b",
