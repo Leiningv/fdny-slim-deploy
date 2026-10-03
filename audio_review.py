@@ -23,6 +23,8 @@ def complaint_lost(text, nature):
 def mixed(text, profile):
     if detect.hatzalah_uws_mixed_request(text, profile):
         return True
+    if detect.hatzalah_backup_then_other_request(text, profile):
+        return True
     if detect.sullivan_numbered_jobs(text, profile):
         return True
     if profile == 'fdny':

@@ -2048,6 +2048,31 @@ def split_dispatch_jobs(text: str, profile: str) -> list[str]:
             if text[a:b].strip(" .,\n")]
 
 
+def hatzalah_backup_then_other_request(text: str, profile: str) -> bool:
+    """Observed 80th Drive/Surrey Place clip: a leading backup request with no
+    complaint, then a different request ('units ... for 160 Wilson for a child
+    unconscious'). The later complaint belongs to the later address, never to
+    the first street. Hold-only; ordinary single calls are not touched.
+    """
+    if profile.removeprefix("zello-") not in ("hatzolah", "hatzalah"):
+        return False
+    t = re.sub(r"\s+", " ", text or "").strip()
+    lead = re.match(r"(?:(?:any|all)\s+)?(?:(?:other|additional)\s+)?backup\s+units?\b[^?.]*[?.]", t, re.I)
+    if not lead:
+        return False
+    first, rest = lead.group(0), t[lead.end():]
+    if get_nature(first, "hatzolah"):
+        return False
+    first_low = first.lower()
+    for sentence in re.split(r"[?.]", rest):
+        if not re.search(r"\bunits?\b", sentence, re.I):
+            continue
+        m = re.search(r"\bfor\s+(\d{2,5})\s+[A-Za-z]{3,}", sentence, re.I)
+        if m and m.group(1) not in first_low and get_nature(sentence, "hatzolah"):
+            return True
+    return False
+
+
 def hatzalah_uws_mixed_request(text: str, profile: str) -> bool:
     """Observed first complaint/corner followed by distinct UWS/Broadway request.
     Hold the whole recording, never choose its first incident or borough.
