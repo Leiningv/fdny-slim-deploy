@@ -1551,6 +1551,13 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         hit["hold_reason"] = "Hatzalah distinct UWS/Broadway request; complaint/address pairing unverified"
         stats.event(profile, "Held: " + hit["hold_reason"])
         return "suppressed"
+    if (profile.removeprefix("zello-") == "hatzalah" and not hit.get("cross")
+            and re.match(r"^\s*\d+(?:st|nd|rd|th)?\s+Ave(?:nue)?\s*(?:,|$)", hit.get("address") or "", re.I)
+            and re.search(r"\b(?:\d+(?:st|nd|rd|th)?|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+Ave(?:nue)?\s+in\s+(?:Queens|Brooklyn|the Bronx|Bronx|Manhattan|Staten Island)\b",
+                          hit.get("dispatch_source_text") or source_text, re.I)):
+        hit["hold_reason"] = "Hatzalah numbered avenue only; no house number or cross street, real street unverified"
+        stats.event(profile, "Held: " + hit["hold_reason"])
+        return "suppressed"
     if hit.get("placeholder_crosses_unresolved") or (hit.get("spoken_between_crosses_required") and not hit.get("cross") and " between " not in hit.get("address", "").lower()):
         hit["hold_reason"] = "spoken between crosses unresolved during transcription" if hit.get("placeholder_crosses_unresolved") else "spoken between crosses lost during extraction"
         stats.event(profile, "Held: " + hit["hold_reason"])
