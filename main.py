@@ -1319,7 +1319,14 @@ def _variant_nature_repeat(profile: str, hit: dict, rows: list, now: float) -> b
     word (Fainted/Fainting) is the same incident, not a new one. Zello feeds
     only; the address must match exactly and the first nature words must share
     a five-letter stem."""
-    if not str(profile).lower().startswith("zello-"):
+    pl = str(profile).lower()
+    is_fdny = pl == "fdny"
+    if not (pl.startswith("zello-") or is_fdny):
+        return False
+    def apt(h):
+        m = re.search(r"\b(?:apartment|apt\.?)\s+([a-z0-9-]+)", (h.get("apartment") or "") + " " + (h.get("nature") or ""), re.I)
+        return m.group(1).lower() if m else ""
+    if is_fdny and not apt(hit):
         return False
     def norm(a):
         return re.sub(r"\s+", " ", (a or "").lower().strip())
@@ -1332,7 +1339,8 @@ def _variant_nature_repeat(profile: str, hit: dict, rows: list, now: float) -> b
         return False
     for r in rows:
         if (r.get("source") == profile and 0 <= now - r.get("t", 0) < _INCIDENT_DEDUP_SEC
-                and norm(r.get("address")) == addr and stem(r.get("nature")) == st):
+                and norm(r.get("address")) == addr and stem(r.get("nature")) == st
+                and (not is_fdny or (apt(hit) and apt(r) == apt(hit)))):
             return True
     return False
 
@@ -2505,6 +2513,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         recent.append({"t": now, "nature": nat_norm, "tokens": sorted(toks),
                        "address": hit["address"], "source": profile,
                        "area_defaulted": bool(hit.get("area_defaulted")),
+                       "apartment": hit.get("apartment") or "",
                        "spoken_locality": hit.get("spoken_locality") or ""})
         _save_recent(recent)
     return "sent"
