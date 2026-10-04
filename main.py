@@ -1314,6 +1314,29 @@ def _locality_repeat_candidate(hit: dict, row: dict, now: float) -> bool:
     return bool(nh and road == new_road and (not oh or oh == nh))
 
 
+def _variant_nature_repeat(profile: str, hit: dict, rows: list, now: float) -> bool:
+    """Hold-only: the same address posted moments ago under a variant nature
+    word (Fainted/Fainting) is the same incident, not a new one. Zello feeds
+    only; the address must match exactly and the first nature words must share
+    a five-letter stem."""
+    if not str(profile).lower().startswith("zello-"):
+        return False
+    def norm(a):
+        return re.sub(r"\s+", " ", (a or "").lower().strip())
+    def stem(n):
+        w = re.findall(r"[a-z]+", (n or "").lower())
+        return w[0][:5] if w and len(w[0]) >= 5 else ""
+    addr = norm(hit.get("address"))
+    st = stem(hit.get("nature"))
+    if not addr or not st:
+        return False
+    for r in rows:
+        if (r.get("source") == profile and 0 <= now - r.get("t", 0) < _INCIDENT_DEDUP_SEC
+                and norm(r.get("address")) == addr and stem(r.get("nature")) == st):
+            return True
+    return False
+
+
 def _load_recent() -> list:
     try:
         data = json.loads(RECENT_FILE.read_text())
@@ -1643,6 +1666,13 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
                 ops_log(f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
                 hit["hold_reason"] = "dup incident"
                 return "suppressed"
+    if nat_norm and _variant_nature_repeat(profile, hit, _load_recent(), now):
+        logging.info("[%s] suppressed (duplicate incident, variant nature): %s @ %s",
+                     profile, hit["nature"], hit["address"])
+        stats.event(profile, f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
+        ops_log(f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
+        hit["hold_reason"] = "dup incident"
+        return "suppressed"
     if re.match(r"^FDNY Box \d+", hit["address"]) and not hit.get("box_only"):
         logging.info("[%s] suppressed (bare box, no street address): %s", profile, hit["address"])
         stats.event(profile, f"suppressed (bare box): {hit['address']}")
@@ -2468,7 +2498,7 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
     if profile == "fdny":
         logging.info("[fdny] stages after_text=%.2fs verify_to_end=%.2fs",
                      time.monotonic()-text_at, time.monotonic()-verify_started)
-    if nat_norm and toks:
+    if nat_norm:
         recent = _load_recent()
         if locality_repeat is not None:
             recent = [r for r in recent if r != locality_repeat]
