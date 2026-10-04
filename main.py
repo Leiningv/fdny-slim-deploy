@@ -1345,6 +1345,22 @@ def _variant_nature_repeat(profile: str, hit: dict, rows: list, now: float) -> b
     return False
 
 
+def _hyphen_digit_house_run(profile: str, hit: dict) -> bool:
+    """Hold-only: the speech-to-text wrote a house number as hyphenated digit
+    groups ('5-2-28 Utrecht Avenue' for 5228) and the parser kept only the
+    last group. Hatzalah feeds only."""
+    pl = str(profile).lower()
+    if not (pl.startswith("zello-hatzalah") or pl.startswith("hatzalah") or pl.startswith("hatzolah")):
+        return False
+    m = re.match(r"\s*(\d{1,5})\s+([A-Za-z]+)", hit.get("address") or "")
+    text = hit.get("dispatch_source_text") or hit.get("excerpt") or ""
+    if not m or not text:
+        return False
+    num, street = m.group(1), m.group(2)
+    pat = (r"(?<![\d-])\d{1,3}(?:-\d{1,3})*-" + re.escape(num) + r"\s+(?:on\s+the\s+)?" + re.escape(street) + r"\b")
+    return bool(re.search(pat, text, re.I))
+
+
 def _load_recent() -> list:
     try:
         data = json.loads(RECENT_FILE.read_text())
@@ -1680,6 +1696,13 @@ async def verify_and_send(profile: str, hit: dict, stats, clip_name: str | None 
         stats.event(profile, f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
         ops_log(f"suppressed (dup incident): {hit['nature']} @ {hit['address']}")
         hit["hold_reason"] = "dup incident"
+        return "suppressed"
+    if _hyphen_digit_house_run(profile, hit):
+        logging.info("[%s] suppressed (house number heard as hyphenated digit run): %s @ %s",
+                     profile, hit["nature"], hit["address"])
+        stats.event(profile, f"Held: house number heard as a hyphenated digit run, may be longer than posted: {hit['address']}")
+        ops_log(f"suppressed (hyphenated house number): {hit['nature']} @ {hit['address']}")
+        hit["hold_reason"] = "house number may be truncated (hyphenated digit run)"
         return "suppressed"
     if re.match(r"^FDNY Box \d+", hit["address"]) and not hit.get("box_only"):
         logging.info("[%s] suppressed (bare box, no street address): %s", profile, hit["address"])
